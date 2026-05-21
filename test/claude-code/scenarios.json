@@ -1,0 +1,11 @@
+{
+  "basic": {
+    "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+    "image": "ghcr.io/mfeineis/agent-sandbox",
+    "features": {
+      "claude-code": {
+        "claudeCodeVersion": "latest"
+      }
+    }
+  }
+}
