@@ -50,11 +50,15 @@ RUN echo "░░░ Set up non-root user..." \
   && usermod -d "/home/$USERNAME" -l "$USERNAME" node \
   && mkdir -p "/home/$USERNAME" \
   && chown -R $USERNAME "/home/$USERNAME" \
-  && if [ -f "/home/$USERNAME" ]; then \
-    sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
-    else echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
-    fi \
   && mkdir -p "/home/$USERNAME/.gnupg" \
+  && mkdir -p /commandhistory \
+  && touch /commandhistory/.bash_history \
+  && chown -R "$USERNAME" /commandhistory \
+  && if [ -f "/home/$USERNAME/.bashrc" ]; then \
+      sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
+    else \
+      echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
+    fi \
   && echo "░░░ ✅ Finished setting up non-root user."
 
 # Security hardening script – sourced from .bashrc before the interactive guard
@@ -98,25 +102,20 @@ RUN echo "░░░ Fixing timezone data..." \
   && echo "░░░ Installing OS packages (sudo intentionally omitted for security)..." \
   && apt-get update && export DEBIAN_FRONTEND=noninteractive \
   && apt-get install -y --no-install-recommends \
-    aggregate \
-    build-essential \
     ca-certificates \
     curl \
     fd-find \
     git \
     gnupg2 \
-    lsb-release \
     less \
     locales \
     man-db \
     nano \
     jq \
     ripgrep \
-    tmux \
     tree \
     unzip \
     vim \
-    wget \
   && apt-get clean && rm -rf /var/lib/apt/lists/* \
   && echo "░░░ ✅ Installed additional OS packages."
 
