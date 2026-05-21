@@ -1,0 +1,17 @@
+{
+  "name": "agent-sandbox",
+  "version": "0.1.0",
+  "description": "",
+  "license": "MIT",
+  "author": "Martin Feineis",
+  "type": "module",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "npx devcontainer --features test"
+  },
+  "devDependencies": {
+    "@devcontainers/cli": "^0.87.0"
+  }
+}
