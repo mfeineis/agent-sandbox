@@ -1,0 +1,31 @@
+{
+  "name": "Claude Code CLI (Agent Sandbox)",
+  "id": "claude-code",
+  "version": "0.1.5",
+  "description": "Installs the Claude Code CLI into an agent sandbox",
+  "options": {
+    "claudeCodeVersion": {
+      "default": "2.1.148",
+      "type": "string"
+    },
+    "gitUser": {
+      "default": "Claude Code (default)",
+      "type": "string"
+    },
+    "gitEmail": {
+      "default": "claude.code@agent.sandbox",
+      "type": "string"
+    }
+  },
+  "containerEnv": {
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code"
+      ]
+    }
+  }
+}
+
