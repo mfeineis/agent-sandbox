@@ -50,11 +50,15 @@ RUN echo "░░░ Set up non-root user..." \
   && usermod -d "/home/$USERNAME" -l "$USERNAME" node \
   && mkdir -p "/home/$USERNAME" \
   && chown -R $USERNAME "/home/$USERNAME" \
-  && if [ -f "/home/$USERNAME" ]; then \
-    sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
-    else echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
+  && if [ -f "/home/$USERNAME/.bashrc" ]; then \
+      sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
+    else \
+      echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
     fi \
   && mkdir -p "/home/$USERNAME/.gnupg" \
+  && mkdir -p /commandhistory \
+  && touch /commandhistory/.bash_history \
+  && chown -R "$USERNAME" /commandhistory \
   && echo "░░░ ✅ Finished setting up non-root user."
 
 # Security hardening script – sourced from .bashrc before the interactive guard
