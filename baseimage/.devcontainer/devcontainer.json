@@ -8,6 +8,7 @@
       "UV_VERSION": "0.11.14"
     }
   },
+  "containerUser": "root",
   "remoteUser": "vscode",
   "userEnvProbe": "none",
   "customizations": {
@@ -28,6 +29,7 @@
     }
   },
   "containerEnv": {
+    "HISTFILE": "/commandhistory/.bash_history",
     "SSH_AUTH_SOCK": "",
     "GPG_AGENT_INFO": "",
     "BROWSER": "",
