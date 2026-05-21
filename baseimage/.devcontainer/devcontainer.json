@@ -28,6 +28,7 @@
     }
   },
   "containerEnv": {
+    "HISTFILE": "/commandhistory/.bash_history",
     "SSH_AUTH_SOCK": "",
     "GPG_AGENT_INFO": "",
     "BROWSER": "",
