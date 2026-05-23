@@ -3,8 +3,8 @@
 
 # Adapted from https://www.danieldemmel.me/blog/coding-agents-in-secured-vscode-dev-containers
 # See also https://github.com/devcontainers/images/blob/main/src/base-ubuntu/.devcontainer/Dockerfile
-ARG NODE_VERSION
-ARG UV_VERSION
+ARG NODE_VERSION=24.16.0
+ARG UV_VERSION=0.11.16
 ARG TZ=Etc/UTC
 
 
@@ -14,18 +14,26 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 
 #####################################################################
-# Node-slim based Devcontainer (most agent tooling is built on Node)
-FROM node:${NODE_VERSION}-slim
+# Node-slim base container for Devcontainer
+FROM node:${NODE_VERSION}-slim AS node-base
+USER root
+WORKDIR /root
+
+
+#####################################################################
+# Agent Sandbox Devcontainer (most agent tooling is built on Node)
+FROM node-base AS sandbox
 ARG TZ
 ENV TZ=${TZ}
 ENV NODE_OPTIONS=--max-old-space-size=4096
 
+LABEL dev.containers.features="common"
 ENV DEVCONTAINER=true
 
 # Create non-root user
 ARG USERNAME=vscode
 ARG USER_UID=1000
-ARG USER_GID=${USER_UID}}
+ARG USER_GID=${USER_UID}
 
 ENV EDITOR=nano
 ENV VISUAL=nano
@@ -45,21 +53,6 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV UV_LINK_MODE=copy
-
-RUN echo "░░░ Set up non-root user..." \
-  && groupmod -n "$USERNAME" node \
-  && usermod -d "/home/$USERNAME" -l "$USERNAME" node \
-  && mkdir -p "/home/$USERNAME" \
-  && mkdir -p "/home/$USERNAME/.gnupg" \
-  && mkdir -p /commandhistory \
-  && touch /commandhistory/.bash_history \
-  && chown -R "$USERNAME" /commandhistory \
-  && if [ -f "/home/$USERNAME/.bashrc" ]; then \
-      sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
-    else \
-      echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
-    fi \
-  && echo "░░░ ✅ Finished setting up non-root user."
 
 # Security hardening script – sourced from .bashrc before the interactive guard
 # See the "VS Code IPC hardening" section for why this is needed
@@ -93,7 +86,21 @@ export GPG_AGENT_INFO=
 
 HARDEN
 
-RUN echo "░░░ Fixing timezone data..." \
+RUN echo "░░░ Set up non-root user..." \
+  && groupmod -n "$USERNAME" node \
+  && usermod -d "/home/$USERNAME" -l "$USERNAME" node \
+  && mkdir -p "/home/$USERNAME" \
+  && mkdir -p "/home/$USERNAME/.gnupg" \
+  && mkdir -p /commandhistory \
+  && touch /commandhistory/.bash_history \
+  && chown -R "$USERNAME" /commandhistory \
+  && if [ -f "/home/$USERNAME/.bashrc" ]; then \
+      sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
+    else \
+      echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
+    fi \
+  && echo "░░░ ✅ Finished setting up non-root user." \
+  && echo "░░░ Fixing timezone data..." \
   && apt-get update \
   && export DEBIAN_FRONTEND=noninteractive \
   && apt-get -y reinstall --no-install-recommends tzdata \
@@ -108,7 +115,6 @@ RUN echo "░░░ Fixing timezone data..." \
     git \
     gnupg2 \
     less \
-    locales \
     man-db \
     nano \
     jq \

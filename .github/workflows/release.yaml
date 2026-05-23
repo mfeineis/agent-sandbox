@@ -2,30 +2,64 @@ name: "Release devcontainer baseimage, features & Generate Documentation"
 on:
   push:
     tags:
-    - 'v*'
-  # workflow_dispatch:
+      - 'v*.*.*'
 
 env:
   REGISTRY: ghcr.io
   DEVCONTAINER_CLI: 0.87.0
 
 jobs:
-  deploy:
-    # if: ${{ github.ref == 'refs/heads/main' }}
+  deploy-baseimage:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
       packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Get tag name
-        run: echo "TAG=$(echo "${{ github.ref }}" | grep -oP 'refs/tags/v\K(.+)')" >> $GITHUB_ENV
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
 
-      - name: Check that tag is set
-        run: if [ -z "${{ env.TAG }}" ]; then { echo "Only releasing with tag!"; exit 2; }; fi
+      - name: Docker Login
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Publish Baseimage to ghcr.io
+        uses: docker/build-push-action@v7
+        with:
+          context: "{{defaultContext}}"
+          target: sandbox
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy-features:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Docker Login
         uses: docker/login-action@v4
@@ -36,15 +70,6 @@ jobs:
 
       - name: "Install devcontainer CLI"
         run: npm install -g @devcontainers/cli@${{ env.DEVCONTAINER_CLI }}
-
-      - name: "Publish Baseimage to ghcr.io"
-        env:
-          IMAGE_BASE_NAME: "${{ env.REGISTRY }}/${{ github.repository }}"
-        run: |
-          set -e
-
-          MINOR="$(echo "${{ env.TAG }}" | sed --regexp-extended 's/^([0-9]+\.[0-9]+)\.[0-9]+/\1/')"
-          devcontainer build --push --no-cache=true --workspace-folder=./baseimage --image-name="${{ env.IMAGE_BASE_NAME }}:latest" --image-name="${{ env.IMAGE_BASE_NAME }}:$MINOR" --image-name="${{ env.IMAGE_BASE_NAME }}:${{ env.TAG }}" --log-level=debug
 
       - name: "Publish Features to ghcr.io"
         uses: devcontainers/action@v1
@@ -74,7 +99,7 @@ jobs:
           message='Automated documentation update'
           # Add / update and commit
           git add */**/README.md
-          git commit -m 'Automated documentation update [skip ci]' || export NO_UPDATES=true
+          git commit -m 'docs: Automated documentation update [skip ci]' || export NO_UPDATES=true
           # Push
           if [ "$NO_UPDATES" != "true" ] ; then
               git push origin "$branch"

@@ -1,6 +1,6 @@
 {
   "name": "agent-sandbox",
-  "version": "0.1.8",
+  "version": "0.1.11",
   "description": "",
   "license": "MIT",
   "author": "Martin Feineis",
@@ -9,7 +9,7 @@
     "test": "test"
   },
   "scripts": {
-    "test": "npx devcontainer --features test"
+    "test": " devcontainer features test --base-image=ghcr.io/mfeineis/agent-sandbox --features base claude-code"
   },
   "devDependencies": {
     "@devcontainers/cli": "^0.87.0"
