@@ -1,0 +1,67 @@
+{
+  "id": "base",
+  "version": "0.1.10",
+  "name": "Agent Sandbox Base Setup",
+  "description": "Provides the base setup for an agent sandbox",
+  "options": {
+    "gitUser": {
+      "default": "Generic Coding Agent",
+      "type": "string"
+    },
+    "gitEmail": {
+      "default": "generic@agent.sandbox",
+      "type": "string"
+    }
+  },
+  "securityOpt": [
+    "no-new-privileges:true"
+  ],
+  "containerEnv": {
+    "BROWSER": "",
+    "GIT_ASKPASS": "",
+    "GPG_AGENT_INFO": "",
+    "HISTFILE": "/commandhistory/.bash_history",
+    "REMOTE_CONTAINERS_DISPLAY_SOCK": "",
+    "REMOTE_CONTAINERS_IPC": "",
+    "REMOTE_CONTAINERS_SOCKETS": "",
+    "SSH_AUTH_SOCK": "",
+    "VSCODE_IPC_HOOK_CLI": "",
+    "VSCODE_GIT_ASKPASS_EXTRA_ARGS": "",
+    "VSCODE_GIT_ASKPASS_MAIN": "",
+    "VSCODE_GIT_ASKPASS_NODE": "",
+    "VSCODE_GIT_IPC_HANDLE": "",
+    "WAYLAND_DISPLAY": ""
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "timonwong.shellcheck",
+        "oxc.oxc-vscode",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "dev.containers.dockerCredentialHelper": false,
+        "dev.containers.copyGitConfig": false,
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.automationProfile.linux": {
+          "path": "/bin/bash"
+        },
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "/bin/bash"
+          }
+        },
+        "editor.codeActionsOnSave": {
+          "source.fixAll.oxlint": "explicit"
+        },
+        "editor.defaultFormatter": "oxc.oxc-vscode",
+        "editor.formatOnSave": true,
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "files.trimFinalNewlines": true
+      }
+    }
+  },
+  // postStartCommand: clean up sockets created before VS Code attaches
+  "postStartCommand": "find /tmp -maxdepth 2 \\( -name 'vscode-ssh-auth-*.sock' -o -name 'vscode-remote-containers-ipc-*.sock' -o -name 'vscode-remote-containers-*.js' \\) -delete 2>/dev/null || true",
+}

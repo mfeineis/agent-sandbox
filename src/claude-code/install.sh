@@ -50,8 +50,9 @@ print_requirements() {
 ERROR: Node.js and npm are required but could not be installed!
 Please add the Node.js feature to your devcontainer.json:
 
+  "image": "ghcr.io/mfeineis/agent-sandbox",
   "features": {
-    "ghcr.io/mfeineis/agent-sandbox": {}
+    "ghcr.io/mfeineis/agent-sandbox/base": {}
     "ghcr.io/mfeineis/agent-sandbox/claude-code": {}
   }
 
@@ -74,18 +75,7 @@ main() {
   install_claude_code || exit 1
 
   mkdir -p /home/$_REMOTE_USER/.claude/ide
-
-  echo "git config user: ${GITUSER}"
-  echo "git config email: ${GITEMAIL}"
-
-  cat << 'GITCONFIG' > "/home/$_REMOTE_USER/.gitconfig"
-[user]
-  name = ${GITUSER}
-  email = ${GITEMAIL}
-
-GITCONFIG
-
-  chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"
+  chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"/.claude
 
   exit 0
 }
