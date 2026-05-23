@@ -1,19 +1,18 @@
 {
   "name": "Claude Code CLI (Agent Sandbox)",
   "id": "claude-code",
-  "version": "0.1.8",
-  "description": "Installs the Claude Code CLI into an agent sandbox",
+  "version": "0.1.9",
+  "dependsOn": {
+    "ghcr.io/mfeineis/agent-sandbox/base:0.1.9": {
+      "gitUser": "Claude Code",
+      "gitEmail": "claude.code@agent.sandbox"
+    }
+  },
+  "name": "Claude Code Agent Sandbox Feature",
+  "description": "Installs the Claude Code CLI into an Agent Sandbox",
   "options": {
     "claudeCodeVersion": {
       "default": "2.1.150",
-      "type": "string"
-    },
-    "gitUser": {
-      "default": "Claude Code (default)",
-      "type": "string"
-    },
-    "gitEmail": {
-      "default": "claude.code@agent.sandbox",
       "type": "string"
     }
   },
@@ -29,4 +28,3 @@
     }
   }
 }
-
