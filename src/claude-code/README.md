@@ -15,7 +15,7 @@ Installs the Claude Code CLI into an Agent Sandbox
 
 | Options Id | Description | Type | Default Value |
 |-----|-----|-----|-----|
-| claudeCodeVersion | - | string | 2.1.150 |
+| claudeCodeVersion | - | string | 2.1.201 |
 
 ## Customizations
 
