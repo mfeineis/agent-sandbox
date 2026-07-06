@@ -1,9 +1,8 @@
 {
-  "name": "Claude Code CLI (Agent Sandbox)",
   "id": "claude-code",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "dependsOn": {
-    "ghcr.io/mfeineis/agent-sandbox/base:0.1.11": {}
+    "ghcr.io/mfeineis/agent-sandbox/base:0.2.0": {}
   },
   "name": "Claude Code Agent Sandbox Feature",
   "description": "Installs the Claude Code CLI into an Agent Sandbox",

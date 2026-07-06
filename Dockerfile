@@ -54,38 +54,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV UV_LINK_MODE=copy
 
-# Security hardening script – sourced from .bashrc before the interactive guard
-# See the "VS Code IPC hardening" section for why this is needed
-COPY <<HARDEN /home/${USERNAME}/.config/security-harden.sh
-
-# VS Code IPC sockets – can execute commands on the host
-unset VSCODE_IPC_HOOK_CLI
-
-# VS Code Git extension IPC – credential access via host
-unset VSCODE_GIT_IPC_HANDLE \
-  GIT_ASKPASS \
-  VSCODE_GIT_ASKPASS_MAIN \
-  VSCODE_GIT_ASKPASS_NODE \
-  VSCODE_GIT_ASKPASS_EXTRA_ARGS
-
-# Remote Containers extension IPC – host command execution bridge
-unset REMOTE_CONTAINERS_IPC \
-  REMOTE_CONTAINERS_SOCKETS \
-  REMOTE_CONTAINERS_DISPLAY_SOCK
-
-# GUI forwarding (low risk but unnecessary)
-unset WAYLAND_DISPLAY
-
-# Browser helper – can trigger actions on host via --openExternal
-# Set to empty rather than unset to prevent fallback to defaults
-export BROWSER=
-
-# Agent forwarding – set to empty to prevent fallback to default socket paths
-export SSH_AUTH_SOCK=
-export GPG_AGENT_INFO=
-
-HARDEN
-
+# 🔥🚧🌲
 RUN echo "░░░ Set up non-root user..." \
   && groupmod -n "$USERNAME" node \
   && usermod -d "/home/$USERNAME" -l "$USERNAME" node \
@@ -94,11 +63,6 @@ RUN echo "░░░ Set up non-root user..." \
   && mkdir -p /commandhistory \
   && touch /commandhistory/.bash_history \
   && chown -R "$USERNAME" /commandhistory \
-  && if [ -f "/home/$USERNAME/.bashrc" ]; then \
-      sed -i '1i source ~/.config/security-harden.sh 2>/dev/null || true' "/home/$USERNAME/.bashrc"; \
-    else \
-      echo "source ~/.config/security-harden.sh 2>/dev/null || true" > "/home/$USERNAME/.bashrc"; \
-    fi \
   && echo "░░░ ✅ Finished setting up non-root user." \
   && echo "░░░ Fixing timezone data..." \
   && apt-get update \

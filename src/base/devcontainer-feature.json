@@ -1,6 +1,6 @@
 {
   "id": "base",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "name": "Agent Sandbox Base Setup",
   "description": "Provides the base setup for an agent sandbox",
   "options": {
@@ -17,20 +17,7 @@
     "no-new-privileges:true"
   ],
   "containerEnv": {
-    "BROWSER": "",
-    "GIT_ASKPASS": "",
-    "GPG_AGENT_INFO": "",
-    "HISTFILE": "/commandhistory/.bash_history",
-    "REMOTE_CONTAINERS_DISPLAY_SOCK": "",
-    "REMOTE_CONTAINERS_IPC": "",
-    "REMOTE_CONTAINERS_SOCKETS": "",
-    "SSH_AUTH_SOCK": "",
-    "VSCODE_IPC_HOOK_CLI": "",
-    "VSCODE_GIT_ASKPASS_EXTRA_ARGS": "",
-    "VSCODE_GIT_ASKPASS_MAIN": "",
-    "VSCODE_GIT_ASKPASS_NODE": "",
-    "VSCODE_GIT_IPC_HANDLE": "",
-    "WAYLAND_DISPLAY": ""
+    "HISTFILE": "/commandhistory/.bash_history"
   },
   "customizations": {
     "vscode": {
@@ -61,7 +48,5 @@
         "files.trimFinalNewlines": true
       }
     }
-  },
-  // postStartCommand: clean up sockets created before VS Code attaches
-  "postStartCommand": "find /tmp -maxdepth 2 \\( -name 'vscode-ssh-auth-*.sock' -o -name 'vscode-remote-containers-ipc-*.sock' -o -name 'vscode-remote-containers-*.js' \\) -delete 2>/dev/null || true",
+  }
 }
