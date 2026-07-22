@@ -4,7 +4,7 @@
 # Adapted from https://www.danieldemmel.me/blog/coding-agents-in-secured-vscode-dev-containers
 # See also https://github.com/devcontainers/images/blob/main/src/base-ubuntu/.devcontainer/Dockerfile
 ARG NODE_VERSION=24.18.0
-ARG UV_VERSION=0.11.26
+ARG UV_VERSION=0.11.30
 ARG TZ=Etc/UTC
 
 

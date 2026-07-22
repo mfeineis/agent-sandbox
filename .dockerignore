@@ -1,0 +1,9 @@
+.devcontainer
+.github
+.vscode
+local
+node_modules
+output
+
+src
+test
