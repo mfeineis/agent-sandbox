@@ -1,6 +1,6 @@
 {
   "id": "base",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "name": "Agent Sandbox Base Setup",
   "description": "Provides the base setup for an agent sandbox",
   "options": {
@@ -23,8 +23,7 @@
     "vscode": {
       "extensions": [
         "timonwong.shellcheck",
-        "oxc.oxc-vscode",
-        "eamodio.gitlens"
+        "oxc.oxc-vscode"
       ],
       "settings": {
         "dev.containers.dockerCredentialHelper": false,
