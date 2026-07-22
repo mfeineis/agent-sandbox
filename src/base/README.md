@@ -24,7 +24,6 @@ Provides the base setup for an agent sandbox
 
 - `timonwong.shellcheck`
 - `oxc.oxc-vscode`
-- `eamodio.gitlens`
 
 
 
