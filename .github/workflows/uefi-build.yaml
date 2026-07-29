@@ -1,0 +1,183 @@
+name: Build AArch64 UEFI firmware
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "firmware-v*"
+
+# Required by actions/attest and by the release-upload step.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  # Full commit behind the reviewed edk2-stable202605 release.
+  EDK2_REF: b03a21a63e3bd001f52c527e5a57feddb53a690b
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            acpica-tools \
+            build-essential \
+            gcc-aarch64-linux-gnu \
+            git \
+            nasm \
+            python3 \
+            uuid-dev
+
+      - name: Fetch the pinned EDK II source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init edk2
+          git -C edk2 remote add origin https://github.com/tianocore/edk2.git
+          git -C edk2 fetch --depth=1 origin "${EDK2_REF}"
+          git -C edk2 checkout --detach FETCH_HEAD
+          git -C edk2 submodule update --init --recursive --depth=1
+
+          resolved_ref="$(git -C edk2 rev-parse HEAD)"
+          printf 'Resolved EDK2_REF %s to %s\n' "${EDK2_REF}" "${resolved_ref}"
+
+          # When EDK2_REF is a full commit ID, require an exact match.
+          if [[ "${EDK2_REF}" =~ ^[0-9a-f]{40}$ ]] &&
+             [[ "${resolved_ref}" != "${EDK2_REF}" ]]; then
+            echo "The fetched EDK II commit does not match EDK2_REF." >&2
+            exit 1
+          fi
+
+          # A source-derived timestamp is less arbitrary than the runner's time.
+          source_date_epoch="$(git -C edk2 show -s --format=%ct HEAD)"
+          echo "SOURCE_DATE_EPOCH=${source_date_epoch}" >> "${GITHUB_ENV}"
+          echo "EDK2_COMMIT=${resolved_ref}" >> "${GITHUB_ENV}"
+
+      - name: Build ArmVirtPkg for QEMU
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd edk2
+          export WORKSPACE="${PWD}"
+          export GCC_AARCH64_PREFIX=aarch64-linux-gnu-
+          export SOURCE_DATE_EPOCH
+
+          # # needed by edksetup.sh
+          # export PYTHON_COMMAND=python3
+          # export EDK_TOOLS_PATH=BaseTools
+          # export CONF_PATH="${WORKSPACE}/Conf"
+
+          # edksetup.sh defines the EDK II build environment and adds BaseTools
+          # to PATH after BaseTools has been compiled.
+          # EDK II's setup scripts assume unset variables expand to empty strings.
+          set +u
+          source edksetup.sh
+          set -u
+
+          make -C BaseTools -j"$(nproc)"
+
+          build \
+            -a AARCH64 \
+            -b RELEASE \
+            -t GCC \
+            -p ArmVirtPkg/ArmVirtQemu.dsc \
+            -n "$(nproc)"
+
+      - name: Collect firmware and provenance information
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          efi_path="$(
+            find edk2/Build/ArmVirtQemu-AArch64 \
+              -type f -path '*/FV/QEMU_EFI.fd' \
+              -print -quit
+          )"
+          test -n "${efi_path}"
+          cp "${efi_path}" dist/QEMU_EFI.fd
+
+          # Some EDK II revisions also produce a variable-store template.
+          vars_path="$(
+            find edk2/Build/ArmVirtQemu-AArch64 \
+              -type f -path '*/FV/QEMU_VARS.fd' \
+              -print -quit
+          )"
+          if [[ -n "${vars_path}" ]]; then
+            cp "${vars_path}" dist/QEMU_VARS.fd
+          fi
+
+          git -C edk2 submodule status --recursive \
+            > dist/edk2-submodules.txt
+
+          {
+            echo "edk2_ref=${EDK2_REF}"
+            echo "edk2_commit=${EDK2_COMMIT}"
+            echo "source_date_epoch=${SOURCE_DATE_EPOCH}"
+            echo "runner_image=${ImageOS:-unknown}"
+            echo "runner_image_version=${ImageVersion:-unknown}"
+            echo
+            aarch64-linux-gnu-gcc --version | head -n 1
+            python3 --version
+            git --version
+            dpkg-query -W \
+              -f='${binary:Package}=${Version}\n' \
+              acpica-tools \
+              build-essential \
+              gcc-aarch64-linux-gnu \
+              git \
+              nasm \
+              python3 \
+              uuid-dev
+          } > dist/build-info.txt
+
+          (
+            cd dist
+            sha256sum QEMU_EFI.fd > QEMU_EFI.fd.sha256
+            sha256sum -- * > SHA256SUMS
+          )
+
+          cat dist/QEMU_EFI.fd.sha256
+
+      # Workflow artifacts are convenient for manual builds, but they expire;
+      # the tagged release below is the durable distribution mechanism.
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qemu-aarch64-uefi-${{ env.EDK2_COMMIT }}
+          path: dist/
+          retention-days: 30
+
+      - name: Generate GitHub build-provenance attestation
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/QEMU_EFI.fd
+
+      - name: Publish versioned release assets
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "AArch64 QEMU UEFI firmware built from ${EDK2_REF} (${EDK2_COMMIT})."
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

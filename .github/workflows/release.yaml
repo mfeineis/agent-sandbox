@@ -1,5 +1,6 @@
 name: "Release devcontainer baseimage, features & Generate Documentation"
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*.*.*'
