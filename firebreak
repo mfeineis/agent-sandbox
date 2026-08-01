@@ -1,0 +1,1060 @@
+#!/bin/sh
+
+cli() {
+  set -eu
+
+  SBX_VERSION="0.2.3"
+  SBX_STORE="firebreak"
+  SBX_CONF_FILE="firebreak.conf"
+  SBX_CLI_VERSION="$SBX_VERSION"
+
+  print_usage() {
+    echo "$0 $SBX_CLI_VERSION usage - easy isolated sandboxes" >&2
+    echo "    <sandbox> create ................... Create a named sandbox" >&2
+    echo "    <sandbox> up ....................... Run sandbox and connect local docker socket" >&2
+    echo "    <sandbox> snapshot <name> create ... Create named snapshot" >&2
+    echo "    <sandbox> snapshot <name> restore .. Restore sandbox to a named snapshot state" >&2
+    echo "    <sandbox> snapshot <name> delete ... Delete a named snapshot" >&2
+    echo "    <sandbox> snapshot --list .......... List snapshots of sandbox" >&2
+    echo "    <sandbox> reset .................... Reset a sandbox to its fresh setup state" >&2
+    echo "    <sandbox> delete ................... Delete a sandbox" >&2
+    echo "    config upgrade ..................... Check dependencies and upgrade configuration" >&2
+    echo "    --list ............................. List all local sandboxes" >&2
+    echo "    --version .......................... Return the script version" >&2
+    echo "    --help ............................. Display this help page" >&2
+    exit 1
+  }
+
+  SBX_TRACING=""
+  SBX_OWNER="mfeineis"
+  SBX_REPO="agent-sandbox"
+  SBX_GIT_SERVER_VERSION="16.0.1-rootless"
+  SBX_GIT_SERVER_PORT=3000
+  SBX_GIT_USER="Claude Code"
+  SBX_GIT_EMAIL="claude@agent.sandbox"
+  SBX_AGENT_VERSION="2.1.112" # stable
+
+  trace() {
+    if [ -z "$SBX_TRACING" ]; then
+      true
+    else
+      echo "[TRACE]:" "$@"
+    fi
+  }
+
+  write_conf() {
+    trace "call write_conf"
+    {
+      echo "# $SBX_STORE conf"
+      echo "git_user=$SBX_GIT_USER"
+      echo "git_email=$SBX_GIT_EMAIL"
+      echo "claude_code_version=$SBX_AGENT_VERSION"
+    } >"$PWD/$SBX_CONF_FILE"
+    trace "return write_conf"
+  }
+
+  read_conf() {
+    if [ -f "$PWD/$SBX_CONF_FILE" ]; then
+      while IFS='=' read -r key val || [ -n "$key" ]; do
+        # Strip leading/trailing whitespace
+        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        val=$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//')
+
+        # Skip empty lines or lines starting with '#'
+        case "$key" in
+          '#'* | '') continue ;;
+        esac
+
+        case "$key" in
+          tracing) SBX_TRACING="$val" ;;
+          owner) SBX_OWNER="$val" ;;
+          repo) SBX_REPO="$val" ;;
+          git_server_version) SBX_GIT_SERVER_VERSION="$val" ;;
+          git_server_port) SBX_GIT_SERVER_PORT="$val" ;;
+          git_user) SBX_GIT_USER="$val" ;;
+          git_email) SBX_GIT_EMAIL="$val" ;;
+          claude_code_version) SBX_AGENT_VERSION="$val" ;;
+          *) echo "Warning: Unknown option '$key' in $SBX_CONF_FILE" >&2 ;;
+        esac
+      done < "$PWD/$SBX_CONF_FILE"
+    else
+      write_conf
+    fi
+    trace "SBX_OWNER ................" "$SBX_OWNER"
+    trace "SBX_REPO ................." "$SBX_REPO"
+    trace "SBX_GIT_SERVER_VERSION ..." "$SBX_GIT_SERVER_VERSION"
+    trace "SBX_GIT_SERVER_PORT ......" "$SBX_GIT_SERVER_PORT"
+    trace "SBX_GIT_USER ............." "$SBX_GIT_USER"
+    trace "SBX_GIT_EMAIL ............" "$SBX_GIT_EMAIL"
+    trace "SBX_AGENT_VERSION ........" "$SBX_AGENT_VERSION"
+  }
+
+  read_conf "$@"
+
+  panic() {
+    status=$(($1 + 0))
+    shift
+    echo "$@" >&2
+    exit $status
+  }
+
+  info() {
+    echo "$@"
+  }
+
+  OS="$(uname -s)"
+  ARCH="$(uname -m)"
+  # QEMU_MACHINE=""
+  # QEMU_BOOT_DISK_ARGS=""
+  case "$ARCH" in
+    x86_64)
+      ALPINE_FIRMWARE=${ALPINE_FIRMWARE:-bios}
+    ;;
+    aarch64|arm64)
+      ARCH="aarch64"
+      # QEMU_MACHINE="-machine virt" # arm64 qemu machine
+      ALPINE_FIRMWARE=${ALPINE_FIRMWARE:-uefi}
+      # QEMU_BOOT_DISK_ARGS="-bios QEMU_EFI.fd"
+      # QEMU_BOOT_DISK_ARGS="-drive if=pflash,format=raw,file=${FIRMWARE_PATH}"
+    ;;
+    *) panic 11 "Unsupported architecture: $ARCH" ;;
+  esac
+  ALPINE_ARCH="$ARCH"
+  QEMU_SYSTEM="qemu-system-$ARCH"
+  if [ "$OS" != "Darwin" ]; then
+    panic 10 "Unsupported OS $OS"
+  fi
+
+  require() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+      panic 2 "Missing dependency" "$@"
+    fi
+  }
+
+  # require squid
+  require echo
+  require printf
+  require cut
+  require awk
+  require sed
+  require sort
+  require tail
+  require grep
+  require cp
+  require rm
+  require wc
+  require sha256sum
+  require sha512sum
+  require gpg ", install i.e. via 'brew install gnupg'"
+  require curl
+  require ssh
+  require ssh-keygen
+  require qemu-img ", install i.e. via 'brew install qemu'"
+  require "$QEMU_SYSTEM" ", install i.e. via 'brew install qemu'"
+
+  DEVCON_STORE=".devcontainer"
+  # WORKDIR=${FIREBREAK_WORKDIR:-"$DEVCON_STORE/firebreak"}
+  # TMPDIR=${FIREBREAK_TMPDIR:-".devcontainer/firebreak/tmp"}
+  STORE="$DEVCON_STORE/$SBX_STORE"
+  STORE_IMG="$STORE/img"
+  STORE_SSH="$STORE/ssh"
+  STORE_SHARED="$STORE/shared"
+  STORE_VM="$STORE/vm"
+
+  FIRMWARE_VERSION="${FIRMWARE_VERSION:-firmware-v202605-edk2-stable}"
+  FIRMWARE_URL="${FIRMWARE_URL:-https://github.com/${OWNER:-mfeineis}/${OWNER_REPO:-agent-sandbox}/releases/download/${FIRMWARE_VERSION}/QEMU_EFI.fd}"
+  FIRMWARE_SHA256="${FIRMWARE_SHA256:-17013c4f9b1f640685c0f0ad24a32d63b8e63a0fb30f33e61e4f6c3abffc65df}"
+
+  # CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/qemu-aarch64-firmware"
+  # CACHE_DIR="${STORE}/img"
+  FIRMWARE_PATH="${STORE_IMG}/${FIRMWARE_VERSION}-QEMU_EFI.fd"
+  # VM_DIR="${VM_DIR:-${PWD}/.vm-aarch64}"
+  # VM_DISK="${VM_DIR}/disk.qcow2"
+  # [ "${FIRMWARE_SHA256}" =~ ^[0-9a-fA-F]{64}$ ] ||
+  #   die "set FIRMWARE_SHA256 to the workflow's QEMU_EFI.fd hash"
+  # mkdir -p "${CACHE_DIR}" "${VM_DIR}"
+
+  # TODO: pull most recent alpine release version
+
+  ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
+  ALPINE_RELEASE="${ALPINE_RELEASE:-v3.24}"
+  ALPINE_VERSION="${ALPINE_VERSION:-3.24.1}"
+  ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
+  # ALPINE_FIRMWARE="${ALPINE_FIRMWARE:-uefi}" # bios or uefi
+  ALPINE_REVISION="${ALPINE_REVISION:-r0}"
+
+  file_size_mb() {
+    bytes=$(wc -c < "$1")
+    mib=$(( (bytes + 1048575) / 1048576 ))
+    printf "%s" $mib
+  }
+
+  mac_addr_from_string() {
+    s="$1"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+      h=$(printf '%s' "$s" | sha256sum | awk '{print $1}')
+    else
+      h=$(printf '%s' "$s" | shasum -a 256 | awk '{print $1}')
+    fi
+
+    printf '52:54:00:%s:%s:%s\n' \
+      "$(printf '%s' "$h" | cut -c1-2)" \
+      "$(printf '%s' "$h" | cut -c3-4)" \
+      "$(printf '%s' "$h" | cut -c5-6)"
+  }
+
+  cmd_create() {
+    set -eu
+    SBX_NAME="$1"
+
+    # TODO: create default .devcontainer setup
+    # TODO: generate local ssh artifacts
+    # TODO: custom project-owned docker socket
+    # TODO: docker context setup
+    # TODO: setup vscode settings
+    # TODO: setup IntelliJ settings
+
+    mkdir -p "${STORE_VM}"
+    mkdir -p "${STORE_SHARED}"
+    mkdir -p "${STORE_IMG}"
+
+    mkdir -p "${STORE_SSH}"
+    chmod 700 "${STORE_SSH}"
+    {
+      printf '[127.0.0.1]:2222 '
+      cat "$STORE_SSH/id_ed25519_guest.pub"
+    } >> "$STORE_SSH/known_hosts"
+    chmod 600 "${STORE_SSH}/*"
+    chmod 644 "${STORE_SSH}/*.pub"
+
+    IMAGE_NAME="generic_alpine-${ALPINE_VERSION}-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-${ALPINE_REVISION}.qcow2"
+    BASE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE}/releases/cloud"
+
+    IMAGE_URL="${BASE_URL}/${IMAGE_NAME}"
+    # SHA512_URL="${IMAGE_URL}.sha512"
+    ASC_URL="${IMAGE_URL}.asc"
+
+    IMAGE_PATH="${STORE_IMG}/${IMAGE_NAME}"
+    # SHA512_PATH="${IMAGE_PATH}.sha512"
+    ASC_PATH="${IMAGE_PATH}.asc"
+
+    if [ -f "${IMAGE_PATH}" ]; then
+      info "Baseimage already present, skipping download."
+    else
+      info "Downloading baseimage:"
+      info "  $IMAGE_URL"
+
+      curl -fL --progress-bar "$IMAGE_URL" -o "${IMAGE_PATH}.part"
+      mv "${IMAGE_PATH}.part" "$IMAGE_PATH"
+
+      info "Downloading detached GPG signature:"
+      info "  $ASC_URL"
+
+      if curl -fL --progress-bar "$ASC_URL" -o "${ASC_PATH}.part"; then
+        mv "${ASC_PATH}.part" "$ASC_PATH"
+        info "Signature downloaded. Verify with your trusted Alpine signing key:"
+        info "  gpg --verify '$ASC_PATH' '$IMAGE_PATH'"
+      else
+        rm -f "${ASC_PATH}.part"
+        info "No .asc signature downloaded; continuing after SHA512 verification."
+      fi
+    fi
+
+    info "Ready:"
+    SZ=$(file_size_mb "${IMAGE_PATH}")
+    info "  [${SZ}MiB] $IMAGE_PATH"
+
+    SBX_PATH="${STORE_VM}/${SBX_NAME}.qcow2"
+    if [ -f "${SBX_PATH}" ]; then
+      info "Sandbox '${SBX_NAME}' already present, skipping creation."
+    else
+      qemu-img convert -O qcow2 "${IMAGE_PATH}" "${SBX_PATH}"
+      qemu-img resize "${SBX_PATH}" 60G
+      qemu-img snapshot -c "base" "${SBX_PATH}"
+    fi
+
+    SZ=$(file_size_mb "${SBX_PATH}")
+    info "  [${SZ}MiB] $SBX_PATH"
+
+    if [ "$ALPINE_FIRMWARE" = "uefi" ]; then
+      info "Procuring UEFI firmware image..."
+
+      verify_firmware() {
+        printf '%s  %s\n' "${FIRMWARE_SHA256}" "${FIRMWARE_PATH}" |
+          sha256sum -c - >/dev/null 2>&1
+      }
+
+      if [ ! -f "${FIRMWARE_PATH}" ] || ! verify_firmware; then
+        temporary="${FIRMWARE_PATH}.download"
+        rm -f "${temporary}"
+
+        printf '  Downloading pinned UEFI firmware...\n'
+        curl \
+          --fail \
+          --location \
+          --proto '=https' \
+          --tlsv1.2 \
+          --output "${temporary}" \
+          "${FIRMWARE_URL}"
+
+        printf '%s  %s\n' "${FIRMWARE_SHA256}" "${temporary}" |
+          sha256sum -c - >/dev/null 2>&1 ||
+          panic 12 "firmware checksum verification failed"
+
+        mv "${temporary}" "${FIRMWARE_PATH}"
+      else
+        info "  Firmware already present, skipping download."
+      fi
+      info "Finished procuring UEFI firmware image. Available at ${FIRMWARE_PATH}, copying into scope..."
+      cp "${FIRMWARE_PATH}" "${PWD}/QEMU_EFI.fd"
+      info "Done."
+    fi
+  }
+
+  cmd_reset() {
+    set -eu
+    qemu-img snapshot -a "base" "${STORE_VM}/$1.qcow2"
+    exec "$QEMU_SYSTEM" \
+      -machine virt -cpu host -accel hvf \
+      -bios QEMU_EFI.fd \
+      \
+      -name "agent-sandbox" \
+      -m 10240 -smp 4 \
+      \
+      -object iothread,id=io_os \
+      -device virtio-scsi-pci,id=scsi_os,iothread=io_os,num_queues=1 \
+      -blockdev "driver=file,node-name=osfile,filename=${STORE_VM}/$1.qcow2,aio=threads" \
+      -blockdev "driver=qcow2,node-name=osdisk,file=osfile,read-only=off" \
+      -device scsi-hd,drive=osdisk,bus=scsi_os.0,channel=0,scsi-id=0,lun=0,bootindex=1 \
+      \
+      -blockdev "driver=vvfat,node-name=cidata,dir=${STORE}/cloud-init,label=CIDATA,read-only=on" \
+      -device scsi-hd,drive=cidata,bus=scsi_os.0,channel=0,scsi-id=1,lun=0 \
+      \
+      -virtfs "local,path=${STORE_SHARED},mount_tag=shared,security_model=mapped-xattr,id=shared,readonly=on" \
+      \
+      -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
+      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
+      -chardev socket,path="${STORE}/qga.sock",server=on,wait=off,id=qga0 \
+      -device virtio-serial-pci \
+      -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
+      -device qemu-xhci -device usb-kbd -device usb-tablet \
+      -k en-us \
+      -device virtio-gpu-pci \
+      -serial mon:stdio
+    # -serial "file:${STORE}/local/serial.log" \
+    # -nographic \
+  }
+
+  cmd_run_vm() {
+    set -eu
+    exec "$QEMU_SYSTEM" \
+      -machine virt -cpu host -accel hvf \
+      -bios QEMU_EFI.fd \
+      \
+      -name "agent-sandbox" \
+      -m 10240 -smp 4 \
+      \
+      -object iothread,id=io_os \
+      -device virtio-scsi-pci,id=scsi_os,iothread=io_os,num_queues=1 \
+      -blockdev "driver=file,node-name=osfile,filename=${STORE_VM}/$1.qcow2,aio=threads" \
+      -blockdev "driver=qcow2,node-name=osdisk,file=osfile,read-only=off" \
+      -device scsi-hd,drive=osdisk,bus=scsi_os.0,channel=0,scsi-id=0,lun=0,bootindex=1 \
+      \
+      -blockdev "driver=vvfat,node-name=cidata,dir=${STORE}/cloud-init,label=CIDATA,read-only=on" \
+      -device scsi-hd,drive=cidata,bus=scsi_os.0,channel=0,scsi-id=1,lun=0 \
+      \
+      -virtfs "local,path=${STORE_SHARED},mount_tag=shared,security_model=mapped-xattr,id=shared,readonly=on" \
+      \
+      -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
+      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
+      -chardev socket,path="${STORE}/qga.sock",server=on,wait=off,id=qga0 \
+      -device virtio-serial-pci \
+      -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
+      -device qemu-xhci -device usb-kbd -device usb-tablet \
+      -k en-us \
+      -device virtio-gpu-pci
+    # -serial "file:${STORE}/local/serial.log" \
+    # -nographic \
+  }
+
+  cmd_git_connect() {
+    set -eu
+    exec ssh -N \
+      -l root \
+      -p 2222 \
+      -i "$STORE_SSH/id_ed25519_host" \
+      -o "UserKnownHostsFile=$STORE_SSH/known_hosts" \
+      -o StrictHostKeyChecking=yes \
+      -o IdentitiesOnly=yes \
+      -o ExitOnForwardFailure=yes \
+      -o StreamLocalBindUnlink=yes \
+      -L 3000:127.0.0.1:3000 \
+      127.0.0.1
+  }
+
+  cmd_connect() {
+    set -eu
+
+    vm_pid=
+    git_ssh_pid=
+    podman_ssh_pid=
+    cleaning=0
+
+    is_alive() {
+      [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+    }
+
+    stop_process() {
+      pid="${1:-}"
+
+      if is_alive "$pid"; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    }
+
+    wait_for_exit() {
+      pid=$1
+      remaining=$2
+
+      while is_alive "$pid" && [ "$remaining" -gt 0 ]; do
+        sleep 1
+        remaining=$((remaining - 1))
+      done
+
+      ! is_alive "$pid"
+    }
+
+    request_vm_shutdown() {
+      printf '%s\n' "Requesting graceful VM shutdown..."
+
+      ssh \
+        -l root \
+        -p 2222 \
+        -i "$STORE_SSH/id_ed25519_host" \
+        -o "UserKnownHostsFile=$STORE_SSH/known_hosts" \
+        -o StrictHostKeyChecking=yes \
+        -o BatchMode=yes \
+        -o IdentitiesOnly=yes \
+        -o ExitOnForwardFailure=yes \
+        -o StreamLocalBindUnlink=yes \
+        -o ConnectTimeout=5 \
+        127.0.0.1 '/sbin/poweroff' \
+        </dev/null
+    }
+
+    cleanup() {
+      status=$?
+
+      # Prevent recursive cleanup if a command below receives a signal.
+      [ "$cleaning" -eq 0 ] || exit "$status"
+      cleaning=1
+
+      trap - EXIT INT TERM HUP
+
+      if is_alive "$vm_pid"; then
+        request_vm_shutdown 2>/dev/null || {
+          printf '%s\n' \
+            "Could not request shutdown over SSH." >&2
+        }
+      fi
+
+      # Stop host-side tunnels. The guest shutdown request has already
+      # been sent, so these are no longer needed.
+      stop_process "$podman_ssh_pid"
+      stop_process "$git_ssh_pid"
+
+      if is_alive "$vm_pid"; then
+        if ! wait_for_exit "$vm_pid" 30; then
+          printf '%s\n' \
+            "VM did not stop within 30 seconds; sending SIGTERM." >&2
+
+          kill -TERM "$vm_pid" 2>/dev/null || true
+
+          if ! wait_for_exit "$vm_pid" 5; then
+            printf '%s\n' \
+                "VM still running; sending SIGKILL." >&2
+            kill -KILL "$vm_pid" 2>/dev/null || true
+          fi
+        fi
+      fi
+
+      # Reap children, suppressing their signal-related exit statuses.
+      [ -z "$podman_ssh_pid" ] || wait "$podman_ssh_pid" 2>/dev/null || true
+      [ -z "$git_ssh_pid" ] || wait "$git_ssh_pid" 2>/dev/null || true
+      [ -z "$vm_pid" ] || wait "$vm_pid" 2>/dev/null || true
+
+      exit "$status"
+    }
+
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    trap cleanup EXIT
+
+    info "Warming up sandbox..."
+    cmd_run_vm "$@" &
+    vm_pid=$!
+
+    sleep 30 # alpine cloud waits for 10s to boot
+
+    info "Exposing local git server..."
+    cmd_git_connect "$@" &
+    git_ssh_pid=$!
+
+    info "Connecting to sandbox socket..."
+    rm -f /tmp/agent-sandbox.sock \
+    && ssh -N \
+      -l root \
+      -p 2222 \
+      -i "$STORE_SSH"/id_ed25519_host \
+      -o "UserKnownHostsFile=$STORE_SSH/known_hosts" \
+      -o StrictHostKeyChecking=yes \
+      -o IdentitiesOnly=yes \
+      -o ExitOnForwardFailure=yes \
+      -o StreamLocalBindUnlink=yes \
+      -L /tmp/agent-sandbox.sock:/run/podman/podman.sock \
+      127.0.0.1 &
+    podman_ssh_pid=$!
+      # -o StrictHostKeyChecking=accept-new \
+
+    info "Sandbox ready."
+    # Keep this command active until the primary tunnel exits or Ctrl+C
+    # triggers the signal trap.
+    wait "$podman_ssh_pid"
+  }
+
+  cmd_config_upgrade() {
+    panic 255 "[NOT_IMPLEMENTED_YET]: cmd_config_upgrade"
+  }
+
+  main() {
+    set +u
+    if [ "$1" = "--list" ]; then
+      for img in "$STORE_VM"/*.qcow2
+      do
+        info "$img"
+        info "[$(file_size_mb "${img}")MiB] $img"
+      done
+    elif [ "$1" = "--help" ]; then
+      print_usage
+    elif [ "$1" = "--version" ]; then
+      echo "$SBX_CLI_VERSION"
+    elif [ "$1" = "config" ]; then
+      if [ -z "$2" ]; then
+        info "No subcommand given for config command"
+        print_usage
+      fi
+      case "$2" in
+        upgrade) cmd_config_upgrade "$@" ;;
+        *) print_usage ;;
+      esac
+    else
+      case "$2" in
+        create)
+          if [ -z "$1" ]; then
+            panic 4 "No sandbox name given"
+          fi
+          cmd_create "$@" && cmd_reset "$@"
+        ;;
+        up)
+          cmd_connect "$@"
+        ;;
+        snapshot)
+          if [ -z "$1" ]; then
+            panic 4 "No name given"
+          fi
+          if [ "$3" = "--list" ]; then
+            qemu-img snapshot -l "$STORE_VM/$1.qcow2"
+          elif [ "$3" = "--help" ]; then
+            print_usage
+          else
+            if [ -z "$4" ]; then
+              panic 5 "No command given"
+            fi
+            case "$4" in
+              create) qemu-img snapshot -c "$3" "$STORE_VM/$1.qcow2" ;;
+              restore) qemu-img snapshot -a "$3" "$STORE_VM/$1.qcow2" ;;
+              delete) qemu-img snapshot -d "$3" "$STORE_VM/$1.qcow2" ;;
+              *) print_usage ;;
+            esac
+          fi
+        ;;
+        reset)
+          if [ -z "$1" ]; then
+            panic 4 "No sandbox name given"
+          fi
+
+          cmd_reset "$@"
+        ;;
+        delete)
+          rm "$STORE_VM/$1.qcow2" && printf '%s' "$1"
+        ;;
+        *) print_usage ;;
+      esac
+    fi
+    set -u
+  }
+
+  migrate() {
+    if [ ! -f "$PWD/.gitignore" ]; then
+      {
+        echo ".devcontainer"
+        echo ".vscode/*"
+        echo "!.vscode/extensions.json"
+        echo "!.vscode/settings.json"
+        echo ".idea/*"
+        echo "!.idea/docker.xml"
+        echo "!.idea/workspace.xml.template"
+        echo "*.swp"
+        echo "*.swo"
+        echo "*~"
+        echo "node_modules"
+      } >> "$PWD/.gitignore"
+    fi
+    if [ ! -f "$PWD/.dockerignore" ]; then
+      {
+        echo ".devcontainer"
+        echo ".github"
+        echo ".vscode"
+        echo "local"
+        echo "node_modules"
+        echo "output"
+        echo "src"
+        echo "test"
+      } >> "$PWD/.dockerignore"
+    fi
+    if [ ! -d "$STORE" ]; then
+      mkdir -p "$STORE"
+    fi
+
+    # yaml_single_quote() {
+    #     # YAML single-quoted strings escape ' as ''.
+    #     printf "'"
+    #     printf '%s' "$1" | sed "s/'/''/g"
+    #     printf "'"
+    # }
+
+    if [ ! -f "$DEVCON_STORE/devcontainer.json" ]; then
+      {
+        cat <<'DEVCONHEAD'
+{
+  "dockerComposeFile": [
+    "compose.yml"
+  ],
+  "service": "sbx",
+  "shutdownAction": "stopCompose",
+  "features": {
+DEVCONHEAD
+    printf '    "ghcr.io/%s/%s/base:%s": {\n' "$SBX_OWNER" "$SBX_REPO" "$SBX_VERSION"
+    printf '      "gitUser": "%s",\n' "$SBX_GIT_USER"
+    printf '      "gitEmail": "%s"\n' "$SBX_GIT_EMAIL"
+    printf '    },\n'
+    printf '    "ghcr.io/%s/%s/claude-code:%s": {\n' "$SBX_OWNER" "$SBX_REPO" "$SBX_VERSION"
+    printf '      "claudeCodeVersion": "%s"\n' "$SBX_AGENT_VERSION"
+    printf '    }\n'
+    cat <<'DEVCONFOOT'
+  },
+  "containerUser": "root",
+  "remoteUser": "vscode",
+  "userEnvProbe": "none",
+  "remoteEnv": {
+    "TZ": "${localEnv:TZ:Europe/Berlin}"
+  },
+  "workspaceFolder": "/home/vscode"
+}
+DEVCONFOOT
+      } >"$DEVCON_STORE/devcontainer.json"
+    fi
+
+    if [ ! -f "$DEVCON_STORE/compose.yml" ]; then
+      {
+        cat <<'COMPOSEHEAD'
+name: asbx
+
+services:
+  git:
+    container_name: git
+    restart: unless-stopped
+COMPOSEHEAD
+    printf '    image: codeberg.org/forgejo/forgejo:%s\n' "$SBX_GIT_SERVER_VERSION"
+    cat <<'COMPOSE1'
+    user: "1000:1000"
+    environment:
+      USER_UID: 1000
+      USER_GID: 1000
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__database__PATH: /var/lib/gitea/data/forgejo.db
+      FORGEJO__server__DISABLE_SSH: "true"
+      FORGEJO__server__OFFLINE_MODE: "true"
+COMPOSE1
+    printf '      FORGEJO__server__ROOT_URL: "http://git:%s/"\n' "$SBX_GIT_SERVER_PORT"
+    cat <<'COMPOSE2'
+    networks:
+      - git-net
+      - gateway-net
+    # Accessible only from the VM itself, for setup or an SSH tunnel.
+    ports:
+COMPOSE2
+    printf '      - "127.0.0.1:%s:%s"\n' "$SBX_GIT_SERVER_PORT" "$SBX_GIT_SERVER_PORT"
+    cat <<'COMPOSE3'
+    volumes:
+      - forgejo-data:/var/lib/gitea
+      - forgejo-config:/etc/gitea
+      - /etc/localtime:/etc/localtime:ro
+
+  sbx:
+    container_name: sbx
+    restart: unless-stopped
+    build:
+      context: ..
+    networks:
+      - sbx-net
+      - git-net
+
+networks:
+  gateway-net:
+    name: gateway-net
+  git-net:
+    name: git-net
+    internal: true
+  sbx-net:
+    name: sbx-net
+
+volumes:
+  forgejo-data:
+  forgejo-config:
+COMPOSE3
+      } >"$DEVCON_STORE/compose.yml"
+    fi
+    if [ ! -d "$STORE/cloud-init" ]; then
+      mkdir -p "$STORE/cloud-init"
+    fi
+    if [ ! -f "$STORE/cloud-init/meta-data" ]; then
+      # TODO(meta-data): Increment instance-id on change
+      echo "instance-id: agent-sandbox-v0.0.0.50"
+      echo "local-hostname: agent-sandbox"
+    fi
+    if [ ! -f "$STORE/cloud-init/network-config" ]; then
+      {
+        cat <<'NETWORK_CONFIG1'
+version: 2
+ethernets:
+  eth0:
+    match:
+NETWORK_CONFIG1
+        printf '      macaddress: "%s"\n' "$(mac_addr_from_string "$SBX_VERSION")"
+        cat <<'NETWORK_CONFIG2'
+    set-name: eth0
+    dhcp4: true
+    dhcp6: false
+    nameservers:
+      addresses:
+        - 10.0.2.3
+        - 8.8.8.8
+        - 8.8.4.4
+        - 1.1.1.1
+NETWORK_CONFIG2
+      } >"$STORE/cloud-init/network-config"
+    fi
+    if [ ! -f "$STORE/cloud-init/user-data" ]; then
+      {
+        cat <<'USER_DATA1'
+#cloud-config
+hostname: agent-sandbox
+manage_etc_hosts: true
+timezone: Europe/Berlin
+
+# network:
+#   config: disabled
+
+manage_resolv_conf: true
+resolv_conf:
+  nameservers:
+    - 10.0.2.3
+    - 8.8.8.8
+    - 8.8.4.4
+    - 1.1.1.1
+
+users:
+  - default
+  - name: root
+    homedir: /root
+    passwd: '*'
+    lock_passwd: false
+    ssh_authorized_keys:
+USER_DATA1
+        printf '      - '
+        printf 'TODO(ssh): include host public key for root access'
+        printf '\n'
+        cat <<'USER_DATA2'
+  - name: alpine
+    groups: wheel
+    shell: /bin/ash
+    homedir: /home/alpine
+    lock_passwd: false
+    uid: 1000
+    # sudo: ALL=(ALL) NOPASSWD:ALL
+    # doas:
+    #   - permit alpine as root
+
+chpasswd:
+  expire: false
+  users:
+    - name: alpine
+      password: alpine
+      type: text
+
+ssh_keys:
+  rsa_private: |
+USER_DATA2
+        printf '    TODO(ssh): include sandbox private key'
+        printf '\n'
+        printf '    rsa_public: TODO(ssh): include sandbox public key'
+        printf '\n'
+        cat <<'USER_DATA3'
+no_ssh_fingerprints: false
+ssh:
+  emit_keys_to_console: false
+ssh_pwauth: false
+disable_root: false
+
+mounts:
+  - ["shared", "/mnt/shared", "9p", "trans=virtio,version=9p2000.L,ro,_netdev", "0", "0" ]
+
+package_update: true
+packages:
+  - podman
+  - iptables
+  - podman-compose
+  - qemu-guest-agent
+  - crun
+# - git
+# - git-lfs
+
+growpart:
+  mode: auto
+  devices: ["/"]
+  ignore_growroot_disabled: false
+
+resize_rootfs: true
+
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/01-datasource.cfg
+    permissions: "0644"
+    content: |
+      datasource_list: ['NoCloud']
+  - path: /usr/sbin/autologin
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      exec login -f alpine
+  - path: /var/lib/cloud/scripts/per-instance/10-autologin.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eux
+      echo "Setting up autologin as alpine user..."
+      sed -i 's@:respawn:/sbin/getty@:respawn:/sbin/getty -n -l /usr/sbin/autologin@g' /etc/inittab
+      echo "Finished setting up autologin as alpine user."
+  - path: /var/lib/cloud/scripts/per-instance/11-kernel-setup.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eux
+
+      ARCH="$(uname -m)"
+
+      case "$ARCH" in
+        x86_64|i386|i486|i586|i686)
+          KOPTS="clocksource=tsc tsc=reliable"
+          ;;
+        *)
+          echo "Skipping x86-specific TSC configuration on ${ARCH}"
+          exit 0
+          ;;
+      esac
+
+      if [ -f /etc/update-extlinux.conf ]; then
+        if ! grep -q 'tsc=reliable' /etc/update-extlinux.conf; then
+          sed -i \
+            "s|^default_kernel_opts=\"\(.*\)\"|default_kernel_opts=\"\1 ${KOPTS}\"|" \
+            /etc/update-extlinux.conf
+
+          update-extlinux
+        fi
+
+      elif [ -f /etc/default/grub ]; then
+        if ! grep -q 'tsc=reliable' /etc/default/grub; then
+          sed -i \
+            "s|^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"|GRUB_CMDLINE_LINUX_DEFAULT=\"\1 ${KOPTS}\"|" \
+            /etc/default/grub
+
+          grub-mkconfig -o /boot/grub/grub.cfg
+        fi
+
+      else
+        echo "No supported bootloader configuration found" >&2
+        exit 1
+      fi
+  - path: /var/lib/cloud/scripts/per-instance/12-gvisor.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      ARCH=$(uname -m)
+      URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
+      wget ${URL}/runsc ${URL}/runsc.sha512 \
+        ${URL}/containerd-shim-runsc-v1 ${URL}/containerd-shim-runsc-v1.sha512
+      sha512sum -c runsc.sha512 \
+        -c containerd-shim-runsc-v1.sha512
+      rm -f *.sha512
+      chmod a+rx runsc containerd-shim-runsc-v1
+      mv runsc containerd-shim-runsc-v1 /usr/local/bin
+
+      /usr/local/bin/runsc install
+
+      echo "user.max_user_namespaces=7182" >> /etc/sysctl.conf
+      echo "kernel.yama.ptrace_scope=0" >> /etc/sysctl.conf
+      echo "kernel.watchdog_thresh=30" >> /etc/sysctl.conf
+  - path: /var/lib/cloud/scripts/per-instance/20-dependencies.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eux
+
+      # --overlay2=all:self
+      # --debug \
+      # --debug-log=/var/log/runsc/ \
+      cat >/usr/local/bin/runsc-custom <<'EOF'
+      #!/bin/sh
+      exec /usr/local/bin/runsc \
+        --platform=systrap \
+        --overlay2=all:memory \
+        "$@"
+      EOF
+      chmod +x /usr/local/bin/runsc-custom
+
+      mkdir -p /etc/containers/containers.conf.d
+
+      cat >/etc/containers/containers.conf.d/98-runtime-policy.conf <<'EOF'
+      # [engine]
+      # pull_policy = "never"
+      EOF
+
+      cat >/etc/containers/containers.conf.d/99-runsc.conf <<'EOF'
+      [engine]
+      runtime = "runsc"
+      pull_policy = "never"
+
+      [engine.runtimes]
+      #runsc = ["/usr/local/bin/runsc"]
+      runsc = ["/usr/local/bin/runsc-custom"]
+      EOF
+
+      cat >/etc/containers/registries.conf.d/99-podman-mirrors.conf <<'EOF'
+USER_DATA3
+      # TODO(docker): configure registry mirrors
+      printf '      unqualified-search-registries = ["...", "docker.io"]'
+      printf '\n'
+        cat <<'USER_DATA4'
+
+      [[registry]]
+      location="docker.io"
+USER_DATA4
+      printf '      [[registry.mirror]]'
+      printf '\n'
+      printf '      location="..."'
+      printf '\n'
+      printf '      pull-from-mirror="all"'
+      printf '\n'
+        cat <<'USER_DATA5'
+      EOF
+
+      echo 'rc_cgroup_mode="unified"' >> /etc/rc.conf
+      echo 'rc_cgroup_controllers="cpuset cpu io memory hugetlb pids"' >> /etc/rc.conf
+
+      rc-update add cgroups sysinit
+      rc-service cgroups start
+      # /run/podman/podman.sock
+      rc-update add podman default
+      rc-service podman restart
+
+      rc-update add qemu-guest-agent default
+      rc-service qemu-guest-agent start || true
+      rc-update show
+  - path: /var/lib/cloud/scripts/per-instance/21-ssh-podman-socket-tunnel.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eux
+
+      chown -R root:root /root
+
+      cat >/etc/ssh/sshd_config.d/root-key-only.conf <<'EOF'
+      PermitRootLogin prohibit-password
+      PasswordAuthentication no
+      PubkeyAuthentication yes
+      KbdInteractiveAuthentication no
+      AllowTcpForwarding yes
+      AllowStreamLocalForwarding yes
+      EOF
+      chmod 600 /etc/ssh/sshd_config.d/*
+
+      rc-service sshd restart
+      rc-update show
+      rc-status --all
+
+  # rc-status --all
+  # wget https://codeberg.org/forgejo/forgejo/releases/download/v16.0.1/forgejo-16.0.1-linux-arm64
+  # chmod +x forgejo-16.0.1-linux-arm64
+  # gpg --keyserver keys.openpgp.org --recv EB114F5E6C0DC2BCDD183550A4B61A2DC5923710
+  # wget https://codeberg.org/forgejo/forgejo/releases/download/v16.0.1/forgejo-16.0.1-linux-arm64.asc
+  # gpg --verify forgejo-16.0.1-linux-arm64.asc forgejo-16.0.1-linux-arm64
+
+  # mv forgejo-16.0.1-linux-arm64 /usr/local/bin/forgejo
+  # chmod 755 /usr/local/bin/forgejo
+
+  # groupadd --system git
+  # useradd --system --shell /bin/ash --comment 'Git Version Control' \
+  #   --gid git --home-dir /home/git --create-home git
+
+  # mkdir /var/lib/forgejo
+  # chown git:git /var/lib/forgejo && chmod 750 /var/lib/forgejo
+
+  # mkdir /etc/forgejo
+  # chown root:git /etc/forgejo && chmod 770 /etc/forgejo
+
+  # chown -R root:root /root/.ssh
+  # - path: /var/lib/cloud/scripts/per-instance/50-podman-pull-cache.sh
+  #   permissions: "0755"
+  #   content: |
+  #     #!/bin/sh
+  #     set -eux
+  #     podman pull hello-world
+
+final_message: "Alpine NoCloud VM is ready after $UPTIME seconds"
+USER_DATA5
+      } >"$STORE/cloud-init/user-data"
+    fi
+  }
+
+  migrate "$@"
+  main "$@"
+}
+
+# make_alpine_download() {
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.qcow2.asc
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-bios-cloudinit-r0.yaml
+
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-uefi-cloudinit-r0.qcow2
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-uefi-cloudinit-r0.qcow2.asc
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-x86_64-uefi-cloudinit-r0.yaml
+
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-aarch64-uefi-cloudinit-r0.qcow2
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-aarch64-uefi-cloudinit-r0.qcow2.asc
+#   https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/cloud/generic_alpine-3.24.1-aarch64-uefi-cloudinit-r0.yaml
+# }
+
+(cd . || exit; cli "$@" || exit)
