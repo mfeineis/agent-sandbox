@@ -4,12 +4,15 @@ cli() {
   set -eu
 
   SBX_VERSION="0.2.3"
+  SBX_BUILD=50
   SBX_STORE="firebreak"
   SBX_CONF_FILE="firebreak.conf"
   SBX_CLI_VERSION="$SBX_VERSION"
 
   print_usage() {
     echo "$0 $SBX_CLI_VERSION usage - easy isolated sandboxes" >&2
+    echo "    config init ........................ Check dependencies and initialize configuration" >&2
+    echo "    config upgrade ..................... Check dependencies and upgrade configuration" >&2
     echo "    <sandbox> create ................... Create a named sandbox" >&2
     echo "    <sandbox> up ....................... Run sandbox and connect local docker socket" >&2
     echo "    <sandbox> snapshot <name> create ... Create named snapshot" >&2
@@ -18,7 +21,6 @@ cli() {
     echo "    <sandbox> snapshot --list .......... List snapshots of sandbox" >&2
     echo "    <sandbox> reset .................... Reset a sandbox to its fresh setup state" >&2
     echo "    <sandbox> delete ................... Delete a sandbox" >&2
-    echo "    config upgrade ..................... Check dependencies and upgrade configuration" >&2
     echo "    --list ............................. List all local sandboxes" >&2
     echo "    --version .......................... Return the script version" >&2
     echo "    --help ............................. Display this help page" >&2
@@ -27,69 +29,19 @@ cli() {
 
   SBX_TRACING=""
   SBX_OWNER="mfeineis"
-  SBX_REPO="agent-sandbox"
+  SBX_OWNER_REPO="agent-sandbox"
+
   SBX_GIT_SERVER_VERSION="16.0.1-rootless"
   SBX_GIT_SERVER_PORT=3000
   SBX_GIT_USER="Claude Code"
   SBX_GIT_EMAIL="claude@agent.sandbox"
+
+  SBX_AGENT_DEVCON_FEATURE=claude-code
+  SBX_AGENT_NPM_PACKAGE="@anthropic-ai/claude-code"
   SBX_AGENT_VERSION="2.1.112" # stable
 
-  trace() {
-    if [ -z "$SBX_TRACING" ]; then
-      true
-    else
-      echo "[TRACE]:" "$@"
-    fi
-  }
-
-  write_conf() {
-    trace "call write_conf"
-    {
-      echo "# $SBX_STORE conf"
-      echo "git_user=$SBX_GIT_USER"
-      echo "git_email=$SBX_GIT_EMAIL"
-      echo "claude_code_version=$SBX_AGENT_VERSION"
-    } >"$PWD/$SBX_CONF_FILE"
-    trace "return write_conf"
-  }
-
-  read_conf() {
-    if [ -f "$PWD/$SBX_CONF_FILE" ]; then
-      while IFS='=' read -r key val || [ -n "$key" ]; do
-        # Strip leading/trailing whitespace
-        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        val=$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//')
-
-        # Skip empty lines or lines starting with '#'
-        case "$key" in
-          '#'* | '') continue ;;
-        esac
-
-        case "$key" in
-          tracing) SBX_TRACING="$val" ;;
-          owner) SBX_OWNER="$val" ;;
-          repo) SBX_REPO="$val" ;;
-          git_server_version) SBX_GIT_SERVER_VERSION="$val" ;;
-          git_server_port) SBX_GIT_SERVER_PORT="$val" ;;
-          git_user) SBX_GIT_USER="$val" ;;
-          git_email) SBX_GIT_EMAIL="$val" ;;
-          claude_code_version) SBX_AGENT_VERSION="$val" ;;
-          *) echo "Warning: Unknown option '$key' in $SBX_CONF_FILE" >&2 ;;
-        esac
-      done < "$PWD/$SBX_CONF_FILE"
-    else
-      write_conf
-    fi
-    trace "SBX_OWNER ................" "$SBX_OWNER"
-    trace "SBX_REPO ................." "$SBX_REPO"
-    trace "SBX_GIT_SERVER_VERSION ..." "$SBX_GIT_SERVER_VERSION"
-    trace "SBX_GIT_SERVER_PORT ......" "$SBX_GIT_SERVER_PORT"
-    trace "SBX_GIT_USER ............." "$SBX_GIT_USER"
-    trace "SBX_GIT_EMAIL ............" "$SBX_GIT_EMAIL"
-    trace "SBX_AGENT_VERSION ........" "$SBX_AGENT_VERSION"
-  }
-
-  read_conf "$@"
+  SBX_UI_SPINNER_STYLE="braille" # ascii
+  SBX_UI_SPINNER_DELAY=0.1 # non-POSIX sub-second spinner delay
 
   panic() {
     status=$(($1 + 0))
@@ -100,6 +52,20 @@ cli() {
 
   info() {
     echo "$@"
+  }
+
+  trace() {
+    if [ -z "$SBX_TRACING" ]; then
+      true
+    else
+      echo "[TRACE]:" "$@"
+    fi
+  }
+
+  require() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+      panic 2 "Missing dependency" "$@"
+    fi
   }
 
   OS="$(uname -s)"
@@ -125,11 +91,12 @@ cli() {
     panic 10 "Unsupported OS $OS"
   fi
 
-  require() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-      panic 2 "Missing dependency" "$@"
-    fi
-  }
+  ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
+  ALPINE_RELEASE="${ALPINE_RELEASE:-v3.24}"
+  ALPINE_VERSION="${ALPINE_VERSION:-3.24.1}"
+  ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
+  # ALPINE_FIRMWARE="${ALPINE_FIRMWARE:-uefi}" # bios or uefi
+  ALPINE_REVISION="${ALPINE_REVISION:-r0}"
 
   # require squid
   require echo
@@ -152,6 +119,149 @@ cli() {
   require qemu-img ", install i.e. via 'brew install qemu'"
   require "$QEMU_SYSTEM" ", install i.e. via 'brew install qemu'"
 
+  npm_latest() {
+    package="$1"
+
+    if command -v jq >/dev/null 2>&1; then
+      encoded=$(
+        printf '%s' "$package" |
+          sed 's/%/%25/g; s/@/%40/g; s|/|%2F|g'
+      )
+      curl -fsSL \
+          "https://registry.npmjs.org/$encoded/latest" |
+          jq -r '.version'
+    else
+      encoded=$(
+        printf '%s' "$package" |
+          sed 's/%/%25/g; s/@/%40/g; s|/|%2F|g'
+      ) || return
+
+      curl -fsSL \
+        "https://registry.npmjs.org/$encoded/latest" |
+        sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+    fi
+  }
+
+  cmd_config_apply() {
+    ALPINE_SERIES=$(
+      printf '%s\n' "$ALPINE_VERSION" |
+        awk -F. '{ print "v" $1 "." $2 }'
+    )
+    ALPINE_IMAGE_NAME="generic_alpine-${ALPINE_VERSION}-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-${ALPINE_REVISION}.qcow2"
+    INDEX_URL="${ALPINE_MIRROR}/${ALPINE_SERIES}/releases/cloud/"
+    ALPINE_IMAGE_URL="${INDEX_URL}${ALPINE_IMAGE_NAME}"
+    ALPINE_SIGNATURE_URL="${ALPINE_IMAGE_URL}.asc"
+  }
+
+  cmd_config_upgrade() {
+    set -u
+    if [ -n "$ALPINE_VERSION" ]; then
+      if ! printf '%s\n' "$ALPINE_VERSION" |
+        grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+      then
+        panic 1 "Invalid Alpine version: $ALPINE_VERSION"
+      fi
+
+      ALPINE_SERIES=$(
+        printf '%s\n' "$ALPINE_VERSION" |
+          awk -F. '{ print "v" $1 "." $2 }'
+      )
+
+      MATCH_VERSION="$ALPINE_VERSION"
+    else
+      ALPINE_SERIES="latest-stable"
+      MATCH_VERSION='[0-9]+\.[0-9]+\.[0-9]+'
+    fi
+
+    INDEX_URL="${ALPINE_MIRROR}/${ALPINE_SERIES}/releases/cloud/"
+    MATCH_RE="^generic_alpine-${MATCH_VERSION}-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-r[0-9]+\\.qcow2$"
+    ALPINE_IMAGE_NAME=$(
+      curl -fsSL "$INDEX_URL" |
+        sed -n 's|.*href="\([^"]*\.qcow2\)".*|\1|p' |
+        grep -E "$MATCH_RE" |
+        sed -n "
+            s|^generic_alpine-\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\)-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-r\([0-9][0-9]*\)\.qcow2$|\1 \2 \3 \4 &|p
+        " |
+        sort -k1,1n -k2,2n -k3,3n -k4,4n |
+        tail -n 1 |
+        cut -d ' ' -f 5-
+    )
+
+    if [ -z "$ALPINE_IMAGE_NAME" ]; then
+      panic 1 "No matching Alpine cloud image found at:\n  $INDEX_URL"
+    fi
+
+    ALPINE_IMAGE_URL="${INDEX_URL}${ALPINE_IMAGE_NAME}"
+    # ALPINE_CHECKSUM_URL="${ALPINE_IMAGE_URL}.sha512"
+    ALPINE_SIGNATURE_URL="${ALPINE_IMAGE_URL}.asc"
+    set +u
+
+    SBX_AGENT_NPM_LATEST=$(npm_latest $SBX_AGENT_NPM_PACKAGE)
+    SBX_AGENT_VERSION=${SBX_AGENT_NPM_LATEST:-SBX_AGENT_VERSION}
+  }
+
+  write_conf() {
+    trace "call write_conf"
+    {
+      echo "# $SBX_STORE conf"
+      echo "alpine_version=$ALPINE_VERSION"
+      echo
+      echo "# User settings"
+      echo "git_user=$SBX_GIT_USER"
+      echo "git_email=$SBX_GIT_EMAIL"
+      echo "claude_code_version=$SBX_AGENT_VERSION"
+    } >"$PWD/$SBX_CONF_FILE"
+    trace "return write_conf"
+  }
+
+  trace_conf() {
+    set +u
+    trace "ALPINE_VERSION ..........." "$ALPINE_VERSION"
+    trace "ALPINE_IMAGE_NAME ........" "$ALPINE_IMAGE_NAME"
+    trace "SBX_VERSION .............." "$SBX_VERSION"
+    trace "SBX_OWNER ................" "$SBX_OWNER"
+    trace "SBX_OWNER_REPO ..........." "$SBX_OWNER_REPO"
+    trace "SBX_GIT_SERVER_VERSION ..." "$SBX_GIT_SERVER_VERSION"
+    trace "SBX_GIT_SERVER_PORT ......" "$SBX_GIT_SERVER_PORT"
+    trace "SBX_GIT_USER ............." "$SBX_GIT_USER"
+    trace "SBX_GIT_EMAIL ............" "$SBX_GIT_EMAIL"
+    trace "SBX_AGENT_DEVCON_FEATURE ." "$SBX_AGENT_DEVCON_FEATURE"
+    trace "SBX_AGENT_VERSION ........" "$SBX_AGENT_VERSION"
+    set -u
+  }
+
+  read_conf() {
+    if [ -f "$PWD/$SBX_CONF_FILE" ]; then
+      while IFS='=' read -r key val || [ -n "$key" ]; do
+        # Strip leading/trailing whitespace
+        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        val=$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//')
+
+        # Skip empty lines or lines starting with '#'
+        case "$key" in
+          '#'* | '') continue ;;
+        esac
+
+        case "$key" in
+          tracing) SBX_TRACING="$val" ;;
+          alpine_version) ALPINE_VERSION="$val" ;;
+          owner) SBX_OWNER="$val" ;;
+          owner_repo) SBX_OWNER_REPO="$val" ;;
+          git_server_version) SBX_GIT_SERVER_VERSION="$val" ;;
+          git_server_port) SBX_GIT_SERVER_PORT="$val" ;;
+          git_user) SBX_GIT_USER="$val" ;;
+          git_email) SBX_GIT_EMAIL="$val" ;;
+          claude_code_version) SBX_AGENT_VERSION="$val" ;;
+          *) echo "Warning: Unknown option '$key' in $SBX_CONF_FILE" >&2 ;;
+        esac
+      done < "$PWD/$SBX_CONF_FILE"
+      cmd_config_apply
+    fi
+    trace_conf
+  }
+
+  read_conf "$@"
+
   DEVCON_STORE=".devcontainer"
   # WORKDIR=${FIREBREAK_WORKDIR:-"$DEVCON_STORE/firebreak"}
   # TMPDIR=${FIREBREAK_TMPDIR:-".devcontainer/firebreak/tmp"}
@@ -162,7 +272,7 @@ cli() {
   STORE_VM="$STORE/vm"
 
   FIRMWARE_VERSION="${FIRMWARE_VERSION:-firmware-v202605-edk2-stable}"
-  FIRMWARE_URL="${FIRMWARE_URL:-https://github.com/${OWNER:-mfeineis}/${OWNER_REPO:-agent-sandbox}/releases/download/${FIRMWARE_VERSION}/QEMU_EFI.fd}"
+  FIRMWARE_URL="${FIRMWARE_URL:-https://github.com/${SBX_OWNER}/${SBX_OWNER_REPO}/releases/download/${FIRMWARE_VERSION}/QEMU_EFI.fd}"
   FIRMWARE_SHA256="${FIRMWARE_SHA256:-17013c4f9b1f640685c0f0ad24a32d63b8e63a0fb30f33e61e4f6c3abffc65df}"
 
   # CACHE_DIR="${XDG_CACHE_HOME:-${HOME}/.cache}/qemu-aarch64-firmware"
@@ -173,15 +283,6 @@ cli() {
   # [ "${FIRMWARE_SHA256}" =~ ^[0-9a-fA-F]{64}$ ] ||
   #   die "set FIRMWARE_SHA256 to the workflow's QEMU_EFI.fd hash"
   # mkdir -p "${CACHE_DIR}" "${VM_DIR}"
-
-  # TODO: pull most recent alpine release version
-
-  ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
-  ALPINE_RELEASE="${ALPINE_RELEASE:-v3.24}"
-  ALPINE_VERSION="${ALPINE_VERSION:-3.24.1}"
-  ALPINE_ARCH="${ALPINE_ARCH:-x86_64}"
-  # ALPINE_FIRMWARE="${ALPINE_FIRMWARE:-uefi}" # bios or uefi
-  ALPINE_REVISION="${ALPINE_REVISION:-r0}"
 
   file_size_mb() {
     bytes=$(wc -c < "$1")
@@ -202,6 +303,154 @@ cli() {
       "$(printf '%s' "$h" | cut -c1-2)" \
       "$(printf '%s' "$h" | cut -c3-4)" \
       "$(printf '%s' "$h" | cut -c5-6)"
+  }
+
+  spinner_frame() {
+    case ${SBX_UI_SPINNER_STYLE-ascii} in
+      braille)
+        case $(($1 % 10)) in
+          0) printf '%s' '⠋' ;;
+          1) printf '%s' '⠙' ;;
+          2) printf '%s' '⠹' ;;
+          3) printf '%s' '⠸' ;;
+          4) printf '%s' '⠼' ;;
+          5) printf '%s' '⠴' ;;
+          6) printf '%s' '⠦' ;;
+          7) printf '%s' '⠧' ;;
+          8) printf '%s' '⠇' ;;
+          9) printf '%s' '⠏' ;;
+        esac
+        ;;
+      *)
+        case $(($1 % 4)) in
+          0) printf '%s' '|' ;;
+          1) printf '%s' '/' ;;
+          2) printf '%s' '-' ;;
+          3) printf '%s' '\' ;;
+        esac
+        ;;
+    esac
+  }
+
+  osc_progress() {
+    # osc_progress 1 10
+    # 0  inactive
+    # 1  progressing
+    # 2  error
+    # 3  indeterminate
+    # 4  paused
+    esc=$(printf '\033')
+
+    if [ "$#" -eq 1 ]; then
+      # State without a percentage.
+      printf '%s]9;4;%s%s\\' "$esc" "$1" "$esc"
+    else
+      printf '%s]9;4;%s;%s%s\\' "$esc" "$1" "$2" "$esc"
+    fi
+  }
+
+  run_with_spinner() {
+    # Do not emit terminal animation when stderr is redirected.
+    if [ ! -t 2 ]; then
+      "$@"
+      return $?
+    fi
+
+    (
+      "$@" &
+      command_pid=$!
+
+      (
+        trap 'exit 0' HUP INT TERM
+        osc_progress 3
+
+        frame_number=0
+        while :; do
+          frame=$(spinner_frame "$frame_number")
+          printf '\r%s Please stand by...' "$frame" >&2
+          frame_number=$((frame_number + 1))
+
+          # POSIX sleep only guarantees whole seconds.
+          sleep "${SBX_UI_SPINNER_DELAY-1}"
+        done
+      ) &
+      spinner_pid=$!
+
+      wait "$command_pid"
+      command_status=$?
+
+      kill "$spinner_pid" 2>/dev/null
+      wait "$spinner_pid" 2>/dev/null
+
+      # Overwrite the previous indicator.
+      printf '\r%-40s\r' '' >&2
+
+      if [ "$command_status" -eq 0 ]; then
+        printf '[ok] Complete\n' >&2
+      else
+        printf '[!!] Failed with status %d\n' \
+          "$command_status" >&2
+      fi
+
+      osc_progress 0
+      exit "$command_status"
+    )
+  }
+
+  progress() {
+    progress_done=$1
+    progress_total=$2
+    progress_width=${3-30}
+
+    [ "$progress_total" -gt 0 ] || return 2
+
+    [ "$progress_done" -lt 0 ] &&
+      progress_done=0
+
+    [ "$progress_done" -gt "$progress_total" ] &&
+      progress_done=$progress_total
+
+    progress_filled=$(
+      printf '%d\n' \
+        "$((progress_done * progress_width / progress_total))"
+    )
+    progress_empty=$((progress_width - progress_filled))
+    progress_percent=$((progress_done * 100 / progress_total))
+
+    printf '\r[' >&2
+
+    progress_i=0
+    while [ "$progress_i" -lt "$progress_filled" ]; do
+      osc_progress $(($progress_percent))
+      printf '#' >&2
+      progress_i=$((progress_i + 1))
+    done
+
+    progress_i=0
+    while [ "$progress_i" -lt "$progress_empty" ]; do
+      printf ' ' >&2
+      progress_i=$((progress_i + 1))
+    done
+
+    printf '] %3d%%' "$progress_percent" >&2
+
+    if [ "$progress_done" -eq "$progress_total" ]; then
+      osc_progress 0
+      printf '\n' >&2
+    fi
+  }
+
+  progress_sample() {
+    i=0
+
+    while [ "$i" -le 100 ]; do
+      progress "$i" 100 25
+
+      # Do one unit of real work here.
+      sleep 1
+
+      i=$((i + 10))
+    done
   }
 
   cmd_create() {
@@ -228,48 +477,49 @@ cli() {
     chmod 600 "${STORE_SSH}/*"
     chmod 644 "${STORE_SSH}/*.pub"
 
-    IMAGE_NAME="generic_alpine-${ALPINE_VERSION}-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-${ALPINE_REVISION}.qcow2"
-    BASE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE}/releases/cloud"
+    # IMAGE_NAME="generic_alpine-${ALPINE_VERSION}-${ALPINE_ARCH}-${ALPINE_FIRMWARE}-cloudinit-${ALPINE_REVISION}.qcow2"
+    # BASE_URL="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_RELEASE}/releases/cloud"
 
-    IMAGE_URL="${BASE_URL}/${IMAGE_NAME}"
+    # ALPINE_IMAGE_URL="${BASE_URL}/${IMAGE_NAME}"
     # SHA512_URL="${IMAGE_URL}.sha512"
-    ASC_URL="${IMAGE_URL}.asc"
+    # ASC_URL="${ALPINE_IMAGE_URL}.asc"
 
-    IMAGE_PATH="${STORE_IMG}/${IMAGE_NAME}"
+    ALPINE_IMAGE_PATH="${STORE_IMG}/${ALPINE_IMAGE_NAME}"
     # SHA512_PATH="${IMAGE_PATH}.sha512"
-    ASC_PATH="${IMAGE_PATH}.asc"
+    # ASC_PATH="${IMAGE_PATH}.asc"
+    ALPINE_SIGNATURE_PATH="${ALPINE_IMAGE_PATH}.asc"
 
-    if [ -f "${IMAGE_PATH}" ]; then
+    if [ -f "${ALPINE_IMAGE_PATH}" ]; then
       info "Baseimage already present, skipping download."
     else
       info "Downloading baseimage:"
-      info "  $IMAGE_URL"
+      info "  $ALPINE_IMAGE_URL"
 
-      curl -fL --progress-bar "$IMAGE_URL" -o "${IMAGE_PATH}.part"
-      mv "${IMAGE_PATH}.part" "$IMAGE_PATH"
+      curl -fL --progress-bar "$ALPINE_IMAGE_URL" -o "${ALPINE_IMAGE_PATH}.part"
+      mv "${ALPINE_IMAGE_PATH}.part" "$ALPINE_IMAGE_PATH"
 
       info "Downloading detached GPG signature:"
-      info "  $ASC_URL"
+      info "  $ALPINE_SIGNATURE_URL"
 
-      if curl -fL --progress-bar "$ASC_URL" -o "${ASC_PATH}.part"; then
-        mv "${ASC_PATH}.part" "$ASC_PATH"
+      if curl -fL --progress-bar "$ALPINE_SIGNATURE_URL" -o "${ALPINE_SIGNATURE_PATH}.part"; then
+        mv "${ALPINE_SIGNATURE_PATH}.part" "$ALPINE_SIGNATURE_PATH"
         info "Signature downloaded. Verify with your trusted Alpine signing key:"
-        info "  gpg --verify '$ASC_PATH' '$IMAGE_PATH'"
+        info "  gpg --verify '$ALPINE_SIGNATURE_PATH' '$ALPINE_IMAGE_PATH'"
       else
-        rm -f "${ASC_PATH}.part"
+        rm -f "${ALPINE_SIGNATURE_PATH}.part"
         info "No .asc signature downloaded; continuing after SHA512 verification."
       fi
     fi
 
     info "Ready:"
-    SZ=$(file_size_mb "${IMAGE_PATH}")
-    info "  [${SZ}MiB] $IMAGE_PATH"
+    SZ=$(file_size_mb "${ALPINE_IMAGE_PATH}")
+    info "  [${SZ}MiB] $ALPINE_IMAGE_PATH"
 
     SBX_PATH="${STORE_VM}/${SBX_NAME}.qcow2"
     if [ -f "${SBX_PATH}" ]; then
       info "Sandbox '${SBX_NAME}' already present, skipping creation."
     else
-      qemu-img convert -O qcow2 "${IMAGE_PATH}" "${SBX_PATH}"
+      qemu-img convert -O qcow2 "${ALPINE_IMAGE_PATH}" "${SBX_PATH}"
       qemu-img resize "${SBX_PATH}" 60G
       qemu-img snapshot -c "base" "${SBX_PATH}"
     fi
@@ -496,7 +746,7 @@ cli() {
     cmd_run_vm "$@" &
     vm_pid=$!
 
-    sleep 30 # alpine cloud waits for 10s to boot
+    run_with_spinner sleep 30 # alpine cloud waits for 10s to boot
 
     info "Exposing local git server..."
     cmd_git_connect "$@" &
@@ -524,10 +774,6 @@ cli() {
     wait "$podman_ssh_pid"
   }
 
-  cmd_config_upgrade() {
-    panic 255 "[NOT_IMPLEMENTED_YET]: cmd_config_upgrade"
-  }
-
   main() {
     set +u
     if [ "$1" = "--list" ]; then
@@ -546,7 +792,8 @@ cli() {
         print_usage
       fi
       case "$2" in
-        upgrade) cmd_config_upgrade "$@" ;;
+        init) cmd_config_upgrade "$@" && write_conf && migrate "$@" ;;
+        upgrade) cmd_config_upgrade "$@" && write_conf ;;
         *) print_usage ;;
       esac
     else
@@ -627,6 +874,18 @@ cli() {
     if [ ! -d "$STORE" ]; then
       mkdir -p "$STORE"
     fi
+    if [ ! -d "$STORE_IMG" ]; then
+      mkdir -p "$STORE_IMG"
+    fi
+    if [ ! -d "$STORE_VM" ]; then
+      mkdir -p "$STORE_VM"
+    fi
+    if [ ! -d "$STORE_SHARED" ]; then
+      mkdir -p "$STORE_SHARED"
+    fi
+    if [ ! -d "$STORE_SSH" ]; then
+      mkdir -p "$STORE_SSH"
+    fi
 
     # yaml_single_quote() {
     #     # YAML single-quoted strings escape ' as ''.
@@ -646,13 +905,18 @@ cli() {
   "shutdownAction": "stopCompose",
   "features": {
 DEVCONHEAD
-    printf '    "ghcr.io/%s/%s/base:%s": {\n' "$SBX_OWNER" "$SBX_REPO" "$SBX_VERSION"
+    printf '    "ghcr.io/%s/%s/base:%s": {\n' "$SBX_OWNER" "$SBX_OWNER_REPO" "$SBX_VERSION"
     printf '      "gitUser": "%s",\n' "$SBX_GIT_USER"
     printf '      "gitEmail": "%s"\n' "$SBX_GIT_EMAIL"
     printf '    },\n'
-    printf '    "ghcr.io/%s/%s/claude-code:%s": {\n' "$SBX_OWNER" "$SBX_REPO" "$SBX_VERSION"
-    printf '      "claudeCodeVersion": "%s"\n' "$SBX_AGENT_VERSION"
-    printf '    }\n'
+    case "$SBX_AGENT_DEVCON_FEATURE" in
+      claude-code)
+        printf '    "ghcr.io/%s/%s/claude-code:%s": {\n' "$SBX_OWNER" "$SBX_OWNER_REPO" "$SBX_VERSION"
+        printf '      "claudeCodeVersion": "%s"\n' "$SBX_AGENT_VERSION"
+        printf '    },\n'
+        ;;
+      *) printf '    // Unsupported agent devcontainer feature "%s"\n' "$SBX_AGENT_DEVCON_FEATURE" ;;
+    esac
     cat <<'DEVCONFOOT'
   },
   "containerUser": "root",
@@ -731,9 +995,13 @@ COMPOSE3
       mkdir -p "$STORE/cloud-init"
     fi
     if [ ! -f "$STORE/cloud-init/meta-data" ]; then
-      # TODO(meta-data): Increment instance-id on change
-      echo "instance-id: agent-sandbox-v0.0.0.50"
-      echo "local-hostname: agent-sandbox"
+      {
+        # TODO(meta-data): Increment instance-id on change
+        printf 'instance-id: agent-sandbox-v%s.%s' "$SBX_VERSION" "$SBX_BUILD"
+        printf '\n'
+        printf 'local-hostname: agent-sandbox'
+        printf '\n'
+      } >"$STORE/cloud-init/meta-data"
     fi
     if [ ! -f "$STORE/cloud-init/network-config" ]; then
       {
@@ -810,7 +1078,7 @@ ssh_keys:
 USER_DATA2
         printf '    TODO(ssh): include sandbox private key'
         printf '\n'
-        printf '    rsa_public: TODO(ssh): include sandbox public key'
+        printf '  rsa_public: TODO(ssh): include sandbox public key'
         printf '\n'
         cat <<'USER_DATA3'
 no_ssh_fingerprints: false
@@ -1005,41 +1273,12 @@ USER_DATA4
       rc-update show
       rc-status --all
 
-  # rc-status --all
-  # wget https://codeberg.org/forgejo/forgejo/releases/download/v16.0.1/forgejo-16.0.1-linux-arm64
-  # chmod +x forgejo-16.0.1-linux-arm64
-  # gpg --keyserver keys.openpgp.org --recv EB114F5E6C0DC2BCDD183550A4B61A2DC5923710
-  # wget https://codeberg.org/forgejo/forgejo/releases/download/v16.0.1/forgejo-16.0.1-linux-arm64.asc
-  # gpg --verify forgejo-16.0.1-linux-arm64.asc forgejo-16.0.1-linux-arm64
-
-  # mv forgejo-16.0.1-linux-arm64 /usr/local/bin/forgejo
-  # chmod 755 /usr/local/bin/forgejo
-
-  # groupadd --system git
-  # useradd --system --shell /bin/ash --comment 'Git Version Control' \
-  #   --gid git --home-dir /home/git --create-home git
-
-  # mkdir /var/lib/forgejo
-  # chown git:git /var/lib/forgejo && chmod 750 /var/lib/forgejo
-
-  # mkdir /etc/forgejo
-  # chown root:git /etc/forgejo && chmod 770 /etc/forgejo
-
-  # chown -R root:root /root/.ssh
-  # - path: /var/lib/cloud/scripts/per-instance/50-podman-pull-cache.sh
-  #   permissions: "0755"
-  #   content: |
-  #     #!/bin/sh
-  #     set -eux
-  #     podman pull hello-world
-
 final_message: "Alpine NoCloud VM is ready after $UPTIME seconds"
 USER_DATA5
       } >"$STORE/cloud-init/user-data"
     fi
   }
 
-  migrate "$@"
   main "$@"
 }
 
