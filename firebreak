@@ -40,6 +40,8 @@ cli() {
   SBX_AGENT_NPM_PACKAGE="@anthropic-ai/claude-code"
   SBX_AGENT_VERSION="2.1.220" # stable
 
+  SBX_OCI_REGISTRY_MIRRORS=${SBX_OCI_REGISTRY_MIRRORS:-""}
+
   SBX_UI_SPINNER_STYLE="braille" # ascii
   SBX_UI_SPINNER_DELAY=0.1 # non-POSIX sub-second spinner delay
 
@@ -230,6 +232,7 @@ cli() {
     set -u
   }
 
+  # We only support allow-lists
   read_conf() {
     if [ -f "$PWD/$SBX_CONF_FILE" ]; then
       while IFS='=' read -r key val || [ -n "$key" ]; do
@@ -255,6 +258,29 @@ cli() {
           *) echo "Warning: Unknown option '$key' in $SBX_CONF_FILE" >&2 ;;
         esac
       done < "$PWD/$SBX_CONF_FILE"
+      cmd_config_apply
+    fi
+    if [ -f "$PWD/.env" ]; then
+      while IFS='=' read -r key val || [ -n "$key" ]; do
+        # Strip leading/trailing whitespace
+        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        val=$(echo "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//')
+
+        # Skip empty lines or lines starting with '#'
+        case "$key" in
+          '#'* | '') continue ;;
+        esac
+
+        case "$key" in
+          SBX_OCI_REGISTRY_MIRRORS)
+            # ENV variables override .env settings
+            if [ -z "$SBX_OCI_REGISTRY_MIRRORS" ]; then
+              SBX_OCI_REGISTRY_MIRRORS="$val"
+            fi
+          ;;
+          *) ;;
+        esac
+      done < "$PWD/.env"
       cmd_config_apply
     fi
     trace_conf
@@ -847,6 +873,7 @@ cli() {
     if [ ! -f "$PWD/.gitignore" ]; then
       {
         echo ".devcontainer"
+echo ".env"
         echo ".vscode/*"
         echo "!.vscode/extensions.json"
         echo "!.vscode/settings.json"
@@ -1222,17 +1249,17 @@ write_files:
 
       cat >/etc/containers/registries.conf.d/99-podman-mirrors.conf <<'EOF'
 USER_DATA3
-      # TODO(docker): configure registry mirrors
-      printf '      unqualified-search-registries = ["...", "docker.io"]'
+            printf '      unqualified-search-registries = ["%s", "docker.io"]' "$SBX_OCI_REGISTRY_MIRRORS"
       printf '\n'
         cat <<'USER_DATA4'
 
       [[registry]]
       location="docker.io"
 USER_DATA4
+printf '\n'
       printf '      [[registry.mirror]]'
       printf '\n'
-      printf '      location="..."'
+      printf '      location="%s"' "$SBX_OCI_REGISTRY_MIRRORS"
       printf '\n'
       printf '      pull-from-mirror="all"'
       printf '\n'
