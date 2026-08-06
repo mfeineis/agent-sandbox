@@ -1,6 +1,6 @@
 {
   "id": "base",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "name": "Agent Sandbox Base Setup",
   "description": "Provides the base setup for an agent sandbox",
   "options": {
