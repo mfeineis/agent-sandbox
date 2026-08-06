@@ -1000,8 +1000,12 @@ COMPOSE2
   sbx:
     container_name: sbx
     restart: unless-stopped
-    build:
-      context: ..
+COMPOSE3
+    printf '    image: ghcr.io/%s/%s:%s' "$SBX_OWNER" "$SBX_OWNER_REPO" "$SBX_VERSION"
+    printf '\n'
+    cat <<'COMPOSE4'
+    # build:
+#   context: ..
     networks:
       - sbx-net
       - git-net
@@ -1018,7 +1022,7 @@ networks:
 volumes:
   forgejo-data:
   forgejo-config:
-COMPOSE3
+COMPOSE4
       } >"$DEVCON_STORE/compose.yml"
     fi
     if [ ! -d "$STORE/cloud-init" ]; then
