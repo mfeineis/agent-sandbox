@@ -483,9 +483,7 @@ cli() {
     set -eu
     SBX_NAME="$1"
 
-    # TODO: create default .devcontainer setup
-    # TODO: generate local ssh artifacts
-    # TODO: custom project-owned docker socket
+        # TODO: custom project-owned docker socket
     # TODO: docker context setup
     # TODO: setup vscode settings
     # TODO: setup IntelliJ settings
@@ -495,6 +493,7 @@ cli() {
     mkdir -p "${STORE_IMG}"
 
     mkdir -p "${STORE_SSH}"
+# from="127.0.0.1,::1",restrict,command="/usr/local/bin/local-task" ssh-ed25519 ...
     chmod 700 "${STORE_SSH}"
     {
       printf '[127.0.0.1]:2222 '
@@ -912,6 +911,10 @@ echo ".env"
     fi
     if [ ! -d "$STORE_SSH" ]; then
       mkdir -p "$STORE_SSH"
+umask 077
+      ssh-keygen -t ed25519 -N '' -f "$STORE_SSH/id_ed25519_guest"
+      ssh-keygen -t ed25519 -N '' -f "$STORE_SSH/id_ed25519_host"
+      touch "$STORE_SSH/known_hosts"
     fi
 
     # yaml_single_quote() {
@@ -1079,8 +1082,9 @@ users:
     lock_passwd: false
     ssh_authorized_keys:
 USER_DATA1
+# TODO(ssh): restrict ssh key usage; i.e. from="127.0.0.1,::1", no-agent-forwarding, no-port-forwarding, no-pty, or a forced command="..."
         printf '      - '
-        printf 'TODO(ssh): include host public key for root access'
+        printf '%s' "$(cat "$STORE_SSH/id_ed25519_host.pub")"
         printf '\n'
         cat <<'USER_DATA2'
   - name: alpine
@@ -1103,9 +1107,11 @@ chpasswd:
 ssh_keys:
   rsa_private: |
 USER_DATA2
-        printf '    TODO(ssh): include sandbox private key'
-        printf '\n'
-        printf '  rsa_public: TODO(ssh): include sandbox public key'
+        while IFS= read -r line || [ -n "$line" ]; do
+            printf '    %s\n' "$line"
+        done < "$STORE_SSH/id_ed25519_guest"
+        printf '  rsa_public: '
+        printf '%s' "$(cat "$STORE_SSH/id_ed25519_guest.pub")"
         printf '\n'
         cat <<'USER_DATA3'
 no_ssh_fingerprints: false
@@ -1303,6 +1309,7 @@ printf '\n'
 final_message: "Alpine NoCloud VM is ready after $UPTIME seconds"
 USER_DATA5
       } >"$STORE/cloud-init/user-data"
+chmod 600 "$STORE/cloud-init/user-data"
     fi
   }
 
