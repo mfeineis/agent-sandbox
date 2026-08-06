@@ -483,7 +483,7 @@ cli() {
     set -eu
     SBX_NAME="$1"
 
-        # TODO: custom project-owned docker socket
+    # TODO: custom project-owned docker socket
     # TODO: docker context setup
     # TODO: setup vscode settings
     # TODO: setup IntelliJ settings
@@ -493,7 +493,7 @@ cli() {
     mkdir -p "${STORE_IMG}"
 
     mkdir -p "${STORE_SSH}"
-# from="127.0.0.1,::1",restrict,command="/usr/local/bin/local-task" ssh-ed25519 ...
+    # from="127.0.0.1,::1",restrict,command="/usr/local/bin/local-task" ssh-ed25519 ...
     chmod 700 "${STORE_SSH}"
     {
       printf '[127.0.0.1]:2222 '
@@ -668,7 +668,7 @@ cli() {
       127.0.0.1
   }
 
-  cmd_connect() {
+  cmd_up() {
     set -eu
 
     vm_pid=
@@ -830,7 +830,7 @@ cli() {
           cmd_create "$@" && cmd_reset "$@"
         ;;
         up)
-          cmd_connect "$@"
+          cmd_up "$@"
         ;;
         snapshot)
           if [ -z "$1" ]; then
@@ -872,7 +872,7 @@ cli() {
     if [ ! -f "$PWD/.gitignore" ]; then
       {
         echo ".devcontainer"
-echo ".env"
+        echo ".env"
         echo ".vscode/*"
         echo "!.vscode/extensions.json"
         echo "!.vscode/settings.json"
@@ -911,7 +911,7 @@ echo ".env"
     fi
     if [ ! -d "$STORE_SSH" ]; then
       mkdir -p "$STORE_SSH"
-umask 077
+      umask 077
       ssh-keygen -t ed25519 -N '' -f "$STORE_SSH/id_ed25519_guest"
       ssh-keygen -t ed25519 -N '' -f "$STORE_SSH/id_ed25519_host"
       touch "$STORE_SSH/known_hosts"
@@ -1005,7 +1005,7 @@ COMPOSE3
     printf '\n'
     cat <<'COMPOSE4'
     # build:
-#   context: ..
+    #   context: ..
     networks:
       - sbx-net
       - git-net
@@ -1086,7 +1086,7 @@ users:
     lock_passwd: false
     ssh_authorized_keys:
 USER_DATA1
-# TODO(ssh): restrict ssh key usage; i.e. from="127.0.0.1,::1", no-agent-forwarding, no-port-forwarding, no-pty, or a forced command="..."
+        # TODO(ssh): restrict ssh key usage; i.e. from="127.0.0.1,::1", no-agent-forwarding, no-port-forwarding, no-pty, or a forced command="..."
         printf '      - '
         printf '%s' "$(cat "$STORE_SSH/id_ed25519_host.pub")"
         printf '\n'
@@ -1259,14 +1259,14 @@ write_files:
 
       cat >/etc/containers/registries.conf.d/99-podman-mirrors.conf <<'EOF'
 USER_DATA3
-            printf '      unqualified-search-registries = ["%s", "docker.io"]' "$SBX_OCI_REGISTRY_MIRRORS"
+      printf '      unqualified-search-registries = ["%s", "docker.io"]' "$SBX_OCI_REGISTRY_MIRRORS"
       printf '\n'
         cat <<'USER_DATA4'
 
       [[registry]]
       location="docker.io"
 USER_DATA4
-printf '\n'
+      printf '\n'
       printf '      [[registry.mirror]]'
       printf '\n'
       printf '      location="%s"' "$SBX_OCI_REGISTRY_MIRRORS"
@@ -1313,7 +1313,7 @@ printf '\n'
 final_message: "Alpine NoCloud VM is ready after $UPTIME seconds"
 USER_DATA5
       } >"$STORE/cloud-init/user-data"
-chmod 600 "$STORE/cloud-init/user-data"
+      chmod 600 "$STORE/cloud-init/user-data"
     fi
   }
 
