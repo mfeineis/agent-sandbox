@@ -6,6 +6,8 @@
 # Top-level Development containers
 /.devcontainer/
 
+/QEMU_EFI.*
+
 # Build artifacts
 /.build/
 /output/
