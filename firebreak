@@ -3,7 +3,7 @@
 cli() {
   set -eu
 
-  SBX_VERSION="0.2.3"
+  SBX_VERSION="0.2.4"
   SBX_BUILD=50
   SBX_STORE="firebreak"
   SBX_CONF_FILE="firebreak.conf"
@@ -22,7 +22,7 @@ cli() {
     echo "    <sandbox> reset .................... Reset a sandbox to its fresh setup state" >&2
     echo "    <sandbox> delete ................... Delete a sandbox" >&2
     echo "    --list ............................. List all local sandboxes" >&2
-    echo "    --version .......................... Return the script version" >&2
+    echo "    --version .......................... Return the tool version" >&2
     echo "    --help ............................. Display this help page" >&2
     exit 1
   }
@@ -38,7 +38,7 @@ cli() {
 
   SBX_AGENT_DEVCON_FEATURE=claude-code
   SBX_AGENT_NPM_PACKAGE="@anthropic-ai/claude-code"
-  SBX_AGENT_VERSION="2.1.112" # stable
+  SBX_AGENT_VERSION="2.1.220" # stable
 
   SBX_UI_SPINNER_STYLE="braille" # ascii
   SBX_UI_SPINNER_DELAY=0.1 # non-POSIX sub-second spinner delay
