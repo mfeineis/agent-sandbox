@@ -1228,14 +1228,19 @@ write_files:
       #!/bin/sh
       set -eux
 
+## Persist root mount on file (default)
+      # --overlay2=root:self
+      ## Persist all mounts on file
       # --overlay2=all:self
+## Persist all mounts in RAM only - even volumes will be gone
+      # --overlay2=all:memory \
       # --debug \
       # --debug-log=/var/log/runsc/ \
       cat >/usr/local/bin/runsc-custom <<'EOF'
       #!/bin/sh
       exec /usr/local/bin/runsc \
         --platform=systrap \
-        --overlay2=all:memory \
+        --overlay2=root:self \
         "$@"
       EOF
       chmod +x /usr/local/bin/runsc-custom
