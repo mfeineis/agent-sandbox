@@ -38,7 +38,7 @@ cli() {
 
   SBX_AGENT_DEVCON_FEATURE=claude-code
   SBX_AGENT_NPM_PACKAGE="@anthropic-ai/claude-code"
-  SBX_AGENT_VERSION="2.1.220" # stable
+  SBX_AGENT_VERSION="2.1.236" # stable
 
   SBX_OCI_REGISTRY_MIRRORS=${SBX_OCI_REGISTRY_MIRRORS:-""}
 
