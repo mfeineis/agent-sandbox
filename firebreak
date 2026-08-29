@@ -31,8 +31,8 @@ cli() {
   SBX_OWNER="mfeineis"
   SBX_OWNER_REPO="agent-sandbox"
 
-  SBX_GIT_SERVER_VERSION="16.0.1-rootless"
-  SBX_GIT_SERVER_PORT=3000
+  SBX_GIT_SERVER_VERSION="16.0.3-rootless"
+  SBX_GIT_SERVER_PORT=3001
   SBX_GIT_USER="Claude Code"
   SBX_GIT_EMAIL="claude@agent.sandbox"
 
@@ -666,7 +666,7 @@ cli() {
       -o IdentitiesOnly=yes \
       -o ExitOnForwardFailure=yes \
       -o StreamLocalBindUnlink=yes \
-      -L 3000:127.0.0.1:3000 \
+      -L "$SBX_GIT_SERVER_PORT:127.0.0.1:$SBX_GIT_SERVER_PORT" \
       127.0.0.1
   }
 
@@ -974,7 +974,7 @@ services:
     restart: unless-stopped
 COMPOSEHEAD
     printf '    image: codeberg.org/forgejo/forgejo:%s\n' "$SBX_GIT_SERVER_VERSION"
-    cat <<'COMPOSE1'
+    cat <<'COMPOSE2'
     user: "1000:1000"
     environment:
       USER_UID: 1000
@@ -983,17 +983,18 @@ COMPOSEHEAD
       FORGEJO__database__PATH: /var/lib/gitea/data/forgejo.db
       FORGEJO__server__DISABLE_SSH: "true"
       FORGEJO__server__OFFLINE_MODE: "true"
-COMPOSE1
+COMPOSE2
+    printf '      FORGEJO__server__HTTP_PORT: "%s"\n' "$SBX_GIT_SERVER_PORT"
     printf '      FORGEJO__server__ROOT_URL: "http://git:%s/"\n' "$SBX_GIT_SERVER_PORT"
-    cat <<'COMPOSE2'
+    cat <<'COMPOSE3'
     networks:
       - git-net
       - gateway-net
     # Accessible only from the VM itself, for setup or an SSH tunnel.
     ports:
-COMPOSE2
+COMPOSE3
     printf '      - "127.0.0.1:%s:%s"\n' "$SBX_GIT_SERVER_PORT" "$SBX_GIT_SERVER_PORT"
-    cat <<'COMPOSE3'
+    cat <<'COMPOSE4'
     volumes:
       - forgejo-data:/var/lib/gitea
       - forgejo-config:/etc/gitea
@@ -1002,10 +1003,10 @@ COMPOSE2
   sbx:
     container_name: sbx
     restart: unless-stopped
-COMPOSE3
+COMPOSE4
     printf '    image: ghcr.io/%s/%s:%s' "$SBX_OWNER" "$SBX_OWNER_REPO" "$SBX_VERSION"
     printf '\n'
-    cat <<'COMPOSE4'
+    cat <<'COMPOSE5'
     # build:
     #   context: ..
     networks:
@@ -1024,7 +1025,7 @@ networks:
 volumes:
   forgejo-data:
   forgejo-config:
-COMPOSE4
+COMPOSE5
       } >"$DEVCON_STORE/compose.yml"
     fi
     if [ ! -d "$STORE/cloud-init" ]; then
