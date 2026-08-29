@@ -862,7 +862,7 @@ cli() {
           cmd_reset "$@"
         ;;
         delete)
-          rm "$STORE_VM/$1.qcow2" && printf '%s' "$1"
+          rm "$STORE_VM/$1.qcow2" && printf '%s\n' "$1"
         ;;
         *) print_usage ;;
       esac
