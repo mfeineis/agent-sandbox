@@ -101,6 +101,7 @@ cli() {
   ALPINE_REVISION="${ALPINE_REVISION:-r0}"
 
   # require squid
+require socat
   require echo
   require printf
   require cut
@@ -610,7 +611,7 @@ cli() {
       -device virtio-9p-pci,fsdev=shared,mount_tag=shared \
       \
       -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
-      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
+      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:57 \
       -chardev socket,path="${STORE}/qga.sock",server=on,wait=off,id=qga0 \
       -device virtio-serial-pci \
       -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
@@ -643,8 +644,8 @@ cli() {
       -fsdev "local,id=shared,path=${STORE_SHARED},security_model=mapped-xattr,readonly=on" \
       -device virtio-9p-pci,fsdev=shared,mount_tag=shared \
       \
-      -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
-      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
+      -netdev 'user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat STDIO TCP:127.0.0.1:11434' \
+      -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:57 \
       -chardev socket,path="${STORE}/qga.sock",server=on,wait=off,id=qga0 \
       -device virtio-serial-pci \
       -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
