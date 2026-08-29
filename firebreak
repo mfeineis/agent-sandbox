@@ -606,7 +606,8 @@ cli() {
       -blockdev "driver=vvfat,node-name=cidata,dir=${STORE}/cloud-init,label=CIDATA,read-only=on" \
       -device scsi-hd,drive=cidata,bus=scsi_os.0,channel=0,scsi-id=1,lun=0 \
       \
-      -virtfs "local,path=${STORE_SHARED},mount_tag=shared,security_model=mapped-xattr,id=shared,readonly=on" \
+      -fsdev "local,id=shared,path=${STORE_SHARED},security_model=mapped-xattr,readonly=on" \
+      -device virtio-9p-pci,fsdev=shared,mount_tag=shared \
       \
       -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
       -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
@@ -639,7 +640,8 @@ cli() {
       -blockdev "driver=vvfat,node-name=cidata,dir=${STORE}/cloud-init,label=CIDATA,read-only=on" \
       -device scsi-hd,drive=cidata,bus=scsi_os.0,channel=0,scsi-id=1,lun=0 \
       \
-      -virtfs "local,path=${STORE_SHARED},mount_tag=shared,security_model=mapped-xattr,id=shared,readonly=on" \
+      -fsdev "local,id=shared,path=${STORE_SHARED},security_model=mapped-xattr,readonly=on" \
+      -device virtio-9p-pci,fsdev=shared,mount_tag=shared \
       \
       -netdev user,id=net0,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:2222-:22 \
       -device virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56 \
@@ -1125,7 +1127,7 @@ ssh_pwauth: false
 disable_root: false
 
 mounts:
-  - ["shared", "/mnt/shared", "9p", "trans=virtio,version=9p2000.L,ro,_netdev", "0", "0" ]
+  - ["shared", "/mnt/shared", "9p", "trans=virtio,version=9p2000.L,ro", "0", "0" ]
 
 package_update: true
 packages:
