@@ -11,15 +11,15 @@ check "node version" node --version
 check "npm version" npm --version
 check "uv self version" uv self version
 
-# check "whoami is 'vscode'" [ "$(whoami)" = "vscode" ]
+check "whoami is 'guest'" [ "$(whoami)" = "guest" ]
 # check "VSCODE_IPC_HOOK_CLI is empty" [ -z "$VSCODE_IPC_HOOK" ]
 # check "BROWSER is empty" [ -z "$BROWSER" ]
 # check "GIT_ASKPASS is empty" [ -z "$GIT_ASKPASS" ]
 
-# check "All capabilities dropped" [ "0000000000000000" = "$(grep 'CapEff' /proc/self/status)" ]
-# check "No-new-privileges enfoced" [ "1" = "$(grep 'NoNewPrivs' /proc/self/status)" ]
+check "All capabilities dropped" [ "0000000000000000" = "$(grep 'CapEff' /proc/self/status)" ]
+check "No-new-privileges enfoced" [ "1" = "$(grep 'NoNewPrivs' /proc/self/status)" ]
 
-# check "export HISTFILE" [ ! -z "$HISTFILE" ]
+check "export HISTFILE" [ ! -z "$HISTFILE" ]
 # check "export CLAUDE_CONFIG_DIR" [ ! -z "$CLAUDE_CONFIG_DIR" ]
 # check "export DISABLE_AUTOUPDATER" [ ! -z "$DISABLE_AUTOUPDATER" ]
 

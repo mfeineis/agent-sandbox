@@ -6,8 +6,6 @@
 # Top-level Development containers
 /.devcontainer/
 
-/QEMU_EFI.*
-
 # Build artifacts
 /.build/
 /output/
@@ -28,10 +26,14 @@ yarn-error.log*
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
-.idea/
+.idea/*
+!.idea/docker.xml
+!.idea/workspace.xml.template
 *.swp
 *.swo
 *~
 
 # Test artifacts
 test-results/
+.devcontainer/firebreak/
+.env

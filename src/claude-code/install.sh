@@ -30,8 +30,8 @@ SETTINGS
 
   # Install Claude Code CLI
   # Manually calling postInstall script since those are disabled for the base image
-  npm install -g "@anthropic-ai/claude-code@$CLAUDECODEVERSION"
-  node "$NPM_CONFIG_PREFIX/lib/node_modules/@anthropic-ai/claude-code/install.cjs"
+  npm install -g "@anthropic-ai/claude-code@$CLIVERSION"
+  node "/home/$_REMOTE_USER/.npm-global/lib/node_modules/@anthropic-ai/claude-code/install.cjs"
 
   if command -v claude >/dev/null; then
     echo "Claude Code CLI installed successfully!"
@@ -64,7 +64,7 @@ EOF
 main() {
   echo "Activating feature 'agent-sandbox/claude-code'"
 
-  echo "Claude Code: ${CLAUDECODEVERSION}"
+  echo "Claude Code: ${CLIVERSION}"
 
   if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
       echo "Node.js or npm not found, failing..."
@@ -74,7 +74,7 @@ main() {
   # Install Claude Code CLI
   install_claude_code || exit 1
 
-  mkdir -p /home/$_REMOTE_USER/.claude/ide
+  mkdir -p "/home/$_REMOTE_USER/.claude/ide"
   chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"/.claude
 
   exit 0

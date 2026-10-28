@@ -1,22 +1,13 @@
 {
   "id": "base",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "name": "Agent Sandbox Base Setup",
   "description": "Provides the base setup for an agent sandbox",
-  "options": {
-    "gitUser": {
-      "default": "Generic Coding Agent",
-      "type": "string"
-    },
-    "gitEmail": {
-      "default": "generic@agent.sandbox",
-      "type": "string"
-    }
-  },
   "securityOpt": [
     "no-new-privileges:true"
   ],
   "containerEnv": {
+    "PROMPT_COMMAND": "history -a",
     "HISTFILE": "/commandhistory/.bash_history"
   },
   "customizations": {
