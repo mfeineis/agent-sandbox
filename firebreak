@@ -1,80 +1,106 @@
 #!/bin/sh
-# Firebreak: a single-file, POSIX-sh macOS/aarch64 development VM manager.
-# The accompanying tests have no QEMU, root, or network requirement.
+
+cli() (
+
 set -eu
 umask 077
 
-VERSION=0.3.0
-BUILD=1051
-STORE_NAME=firebreak
-CONF=firebreak.conf
-ROOT=$(pwd -P)
-STORE=$ROOT/.devcontainer/firebreak
-IMAGES=$STORE/img
-VMS=$STORE/vm
-SEEDS=$STORE/seeds
-SECRETS=$STORE/secrets
-SHARED=$STORE/shared
-TMP=$STORE/tmp
-PROXY=$STORE/proxy
-SYNC=$STORE/sync
+CLI_NAME=$(printf '%s' "${0##*/}")
+CLI_VERSION=0.4.0
 
-say() { printf '%s\n' "$*" >&2; }
-die() { say "firebreak: $*"; exit 1; }
-need() { command -v "$1" >/dev/null 2>&1 || die "Missing '$1' (try: brew install ${2:-$1})"; }
-# Homebrew keeps Squid in opt/squid/sbin (usually outside the interactive PATH).
-# Return an executable PATH, never rely on shell aliases or exported functions.
-resolve_squid() (
-  if [ -n "${FIREBREAK_SQUID:-}" ]; then
-    case $FIREBREAK_SQUID in /*) :;; *) die 'FIREBREAK_SQUID must be an absolute path';; esac
-    [ -f "$FIREBREAK_SQUID" ] && [ -x "$FIREBREAK_SQUID" ] || die "Squid not executable: $FIREBREAK_SQUID"
-    printf '%s\n' "$FIREBREAK_SQUID"
-    exit 0
-  fi
-  candidate=$(command -v squid 2>/dev/null) || candidate=
-  # Ignore alias/function output: only absolute, executable file paths are valid.
-  case $candidate in /*) if [ -f "$candidate" ] && [ -x "$candidate" ]; then printf '%s\n' "$candidate"; exit 0; fi;; esac
-  if command -v brew >/dev/null 2>&1; then
-    prefix=$(brew --prefix squid 2>/dev/null) || prefix=
-    if [ -n "$prefix" ] && [ -f "$prefix/sbin/squid" ] && [ -x "$prefix/sbin/squid" ]; then
-      printf '%s\n' "$prefix/sbin/squid"
-      exit 0
-    fi
-  fi
-  for candidate in /opt/homebrew/opt/squid/sbin/squid /usr/local/opt/squid/sbin/squid; do
-    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      exit 0
-    fi
-  done
-  die "Missing 'squid' (try: brew install squid; or set FIREBREAK_SQUID=/absolute/path/to/squid)"
-)
-valid_name() { case $1 in ''|*[!a-zA-Z0-9_.-]*|.|..|.*) return 1;; esac; return 0; }
-valid_port() { case $1 in ''|*[!0-9]*) return 1;; esac; [ "$1" -gt 0 ] && [ "$1" -le 65535 ]; }
-valid_dnsname() { case $1 in ''|*[!a-zA-Z0-9.-]*|.*|*..*|*.) return 1;; esac; return 0; }
-valid_list() { case $1 in *[!a-zA-Z0-9,_.-]*) return 1;; esac; return 0; }
-valid_version() { printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
-# Functions using scratch variables run in subshells, avoiding global POSIX-sh scoping hazards.
-mac_from_string() (
-  need shasum
-  hash=$(printf '%s' "$1" | shasum -a 256 | awk '{print $1}')
-  printf '52:54:00:%s:%s:%s\n' "$(printf '%s' "$hash" | cut -c1-2)" "$(printf '%s' "$hash" | cut -c3-4)" "$(printf '%s' "$hash" | cut -c5-6)"
-)
-rand_hex() { od -An -N "$1" -tx1 /dev/urandom | tr -d ' \n'; }
-write_if_changed() { # stdin -> path; replace atomically and only on actual changes
-  dest=$1
-  mkdir -p "$(dirname "$dest")"
-  temp=$(mktemp "${dest}.XXXXXX") || return 1
-  cat > "$temp"
-  if [ -f "$dest" ] && cmp -s "$temp" "$dest"; then rm -f "$temp"; else mv -f "$temp" "$dest"; fi
+print_usage() {
+  #### "######### ######### ######### ######### ######### ######### ######### #########"
+  echo "$CLI_NAME $CLI_VERSION: Isolated VM Sandboxes" >&2
+  echo "Usage: $CLI_NAME <...>" >&2
+  echo >&2
+  echo "  config {init,apply,upgrade} ........ Managing sandbox configuration" >&2
+  echo "  config init ........................ Initialize fresh configuration" >&2
+  echo "         init --install-deps ......... Install dependencies during init" >&2
+  echo "  config apply ....................... Apply current configuration" >&2
+  echo "  config upgrade ..................... Refresh image versions" >&2
+  echo >&2
+  echo "  <name> {new,delete,logs,doctor} .... Managing named sandboxes" >&2
+  echo "  <name> new ......................... Create a new named sandbox" >&2
+  echo "         new --storage=ephemeral ..... OCI runtime overlay is not retained (default)" >&2
+  echo "         new --storage=persistent .... OCI runtime overlay is persisted" >&2
+  echo "         new --no-boot ............... Only create but not boot a new sandbox" >&2
+  echo "  <name> delete ...................... Delete an existing named sandbox" >&2
+  echo "  <name> doctor ...................... Outputs debug information about a sandbox" >&2
+  echo "  <name> logs ........................ View host-captured serial sandbox output" >&2
+  echo "         logs --follow ............... Follow host-captured serial sandbox output" >&2
+  echo "  --list ............................. List all known sandboxes" >&2
+  echo >&2
+  echo "  <name> {unsafe,up} ................. Boot up a named sandbox" >&2
+  echo "  <name> unsafe ...................... Boot sandbox in *unsafe* mode for setup" >&2
+  echo "  <name> up .......................... Boot sandbox in restricted *work* mode" >&2
+  echo >&2
+  echo "  <name> sh .......................... Interactive host shell with sandbox integration" >&2
+  echo "         sh <shell-command> .......... Host shell with sandbox integration" >&2
+  echo "  <name> use <user> <service> <shell>  Guest shell integration for compose.yml" >&2
+  echo >&2
+  echo "  <name> {push,pull} ................. Exchange repository snapshot with sandbox" >&2
+  echo "  <name> push ........................ Push repository snapshot into sandbox" >&2
+  echo "         push --history=snapshot ..... Push flat snapshot without history (default)" >&2
+  echo "         push --history=shallow ...... Push shallow history checkout" >&2
+  echo "         push --history=full ......... Push full repository history" >&2
+  echo "         push --depth=N .............. Push N levels of Git history" >&2
+  echo "  <name> pull ........................ Pull sandbox working copy into new host branch" >&2
+  echo >&2
+  echo "  <name> snapshot .................... Manages named sandbox snapshots" >&2
+  echo "         snapshot <snapshot> new ..... Creates a new named snapshot of a sandbox" >&2
+  echo "         snapshot <snapshot> restore . Restores a named snapshot of a sandbox" >&2
+  echo "         snapshot <snapshot> delete .. Deletes a named snapshot of a sandbox" >&2
+  echo "         snapshot --list ............. Lists all known snapshot of sandbox" >&2
+  echo >&2
+  echo "  --version .......................... Returns the $CLI_NAME version" >&2
+  echo "  --help ............................. Show this help screen" >&2
+  echo "  --self-test ........................ Runs self-test for this $CLI_NAME" >&2
+  echo >&2
+  echo "Environment variables:" >&2
+  echo "  FIREBREAK_SQUID .................... Provide absolute path to 'squid' firewall" >&2
+  #### "######### ######### ######### ######### ######### ######### ######### #########"
+  exit $EX_USAGE
 }
+
+FIREBREAK_SQUID=${FIREBREAK_SQUID:-}
+
+# Follows libc standard https://man7.org/linux/man-pages/man3/sysexits.h.3head.html
+EX_OK=0 # successful termination
+EX_USAGE=64 # command line usage error
+EX_DATAERR=65 # data format error
+EX_NOINPUT=66 # cannot open input
+EX_UNAVAILABLE=69 # service unavailable
+EX_SOFTWARE=70 # internal software error
+EX_OSERR=71 # system error (.e.g, can't fork)
+EX_CANTCREAT=73 # can't create (user) output file
+EX_IOERR=74 # input/output error
+EX_TEMPFAIL=75 # temp failure; user is invited to retry
+EX_PROTOCOL=76 # remote error in protocol
+EX_NOPERM=77 # permission denied
+EX_CONFIG=78 # configuration error
+
+BUILD=1052
+STORE_NAME=".devcontainer"
+ROOT=$(pwd -P)
+STORE="$ROOT/$STORE_NAME"
+CONF_NAME="$CLI_NAME.conf"
+CONF="$STORE/$CONF_NAME"
+IMAGES="$STORE/state/img"
+VMS="$STORE/state/vm"
+SEEDS="$STORE/state/seeds"
+SECRETS="$STORE/state/secrets"
+SHARED="$STORE/state/shared"
+TMP="$STORE/state/tmp"
+PROXY="$STORE/state/proxy"
+SYNC="$STORE/state/sync"
+OCI_STORE="$STORE/state/oci"
 
 # Stable defaults; never source user-supplied configuration as shell code.
 ALPINE_VERSION=3.24.1
 ALPINE_REVISION=r0
 ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
-GIT_USER='Firebreak Agent'
-GIT_EMAIL=agent@firebreak.invalid
+GIT_USER='Sandbox Guest'
+GIT_EMAIL=guest@firebreak.invalid
 GIT_IMPORT=snapshot
 STORAGE=ephemeral
 VM_MEMORY=10240
@@ -86,70 +112,254 @@ SQUID_PORT=3128
 SQUID_MODELS_PORT=3129
 NETWORK_WORK=offline
 BOOT_TIMEOUT=0
-RUNTIME_UNSAFE=crun
+RUNTIME_UNSAFE=runsc
 RUNTIME_OFFLINE=runsc
 RUNTIME_MODELS=runsc
 MODELS=ollama
 FORGEJO_PACKAGE=forgejo
 GUEST_USER=alpine
-SBX_OCI_REGISTRY_MIRRORS=${SBX_OCI_REGISTRY_MIRRORS:-}
+# SBX_OCI_REGISTRY_MIRRORS=${SBX_OCI_REGISTRY_MIRRORS:-}
 FIRMWARE_VERSION=firmware-v202605-edk2-stable
 FIRMWARE_SHA256=17013c4f9b1f640685c0f0ad24a32d63b8e63a0fb30f33e61e4f6c3abffc65df
 FIRMWARE_URL=https://github.com/mfeineis/agent-sandbox/releases/download/firmware-v202605-edk2-stable/QEMU_EFI.fd
 ALPINE_FPR='F26A DFAD BAE7 02EF 7AF6 3745 9DA7 EF23 BFFC DF22'
+SHARE_ENABLED=0
+DISPLAY_ENABLED=1
 
+# Internal state "globals"
+CURRENT_PROFILE=
+FORGEJO_API_URL=
+FORGEJO_HOST_URL=
+HOST_FORGEJO_NETRC=
+HOST_FORGEJO_ASKPASS=
+
+panic() {
+  status=$(($1 + 0))
+  shift
+  echo "[$CLI_NAME] $*" >&2
+  exit $status
+}
+
+info() { printf '[%s] %s\n' "$CLI_NAME" "$*" >&2; }
+warn() { printf '[%s:WARN] %s\n' "$CLI_NAME" "$*" >&2; }
+
+require() {
+  _dep="$1"
+  if ! command -v "$_dep" >/dev/null 2>&1; then
+    case "${2:-}" in
+      '') panic $EX_UNAVAILABLE "Missing dependency '$_dep' (try: $CLI_NAME config init --install-deps)" ;;
+      *) panic $EX_UNAVAILABLE "Missing dependency '$_dep', part of package '$2' (try: $CLI_NAME config init --install-deps)" ;;
+    esac
+  fi
+}
+
+# Environment dependencies
+require awk
+require mktemp
+require sed
+require sha256sum coreutils
+require sort
+require ssh
+require ssh-keygen
+require tar
+require tr
+
+# Actual dependencies
+require brew
+require curl
+require git
+require gpg gnupg
+require qemu-system-aarch64 qemu
+require qemu-img qemu
+require socat
+# require squid # resolve_squid is used to find the 'squid' installation
+
+# Homebrew keeps Squid in opt/squid/sbin (usually outside the interactive PATH).
+# Return an executable PATH, never rely on shell aliases or exported functions.
+resolve_squid() {
+  if [ -n "$FIREBREAK_SQUID" ]; then
+    case $FIREBREAK_SQUID in
+      /*) : ;;
+      *) panic $EX_CONFIG 'FIREBREAK_SQUID must be an absolute path' ;;
+    esac
+    [ -f "$FIREBREAK_SQUID" ] && [ -x "$FIREBREAK_SQUID" ] || panic $EX_NOPERM "Squid not executable: $FIREBREAK_SQUID"
+    printf '%s\n' "$FIREBREAK_SQUID"
+    exit $EX_OK
+  fi
+  candidate=$(command -v squid 2>/dev/null) || candidate=
+  # Ignore alias/function output: only absolute, executable file paths are valid.
+  case $candidate in
+    /*)
+      if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        exit $EX_OK
+      fi
+    ;;
+  esac
+  if command -v brew >/dev/null 2>&1; then
+    prefix=$(brew --prefix squid 2>/dev/null) || prefix=
+    if [ -n "$prefix" ] && [ -f "$prefix/sbin/squid" ] && [ -x "$prefix/sbin/squid" ]; then
+      printf '%s\n' "$prefix/sbin/squid"
+      exit $EX_OK
+    fi
+  fi
+  for candidate in /opt/homebrew/opt/squid/sbin/squid /usr/local/opt/squid/sbin/squid; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      exit $EX_OK
+    fi
+  done
+  panic $EX_UNAVAILABLE "Missing dependency 'squid' (try: brew install squid; or set FIREBREAK_SQUID=/absolute/path/to/squid)"
+}
+
+valid_name() { case $1 in ''|*[!a-zA-Z0-9_.-]*|.|..|.*) return 1;; esac; return 0; }
+
+valid_port() { case $1 in ''|*[!0-9]*) return 1;; esac; [ "$1" -gt 0 ] && [ "$1" -le 65535 ]; }
+
+valid_dnsname() { case $1 in ''|*[!a-zA-Z0-9.-]*|.*|*..*|*.) return 1;; esac; return 0; }
+
+valid_list() { case $1 in *[!a-zA-Z0-9,_.-]*) return 1;; esac; return 0; }
+
+valid_version() { printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+
+mac_from_string() {
+  require shasum
+  hash=$(printf '%s' "$1" | shasum -a 256 | awk '{print $1}')
+  printf '52:54:00:%s:%s:%s\n' \
+    "$(printf '%s' "$hash" | cut -c1-2)" \
+    "$(printf '%s' "$hash" | cut -c3-4)" \
+    "$(printf '%s' "$hash" | cut -c5-6)"
+}
+
+rand_hex() { od -An -N "$1" -tx1 /dev/urandom | tr -d ' \n'; }
+
+write_if_changed() {
+  # stdin -> path; replace atomically and only on actual changes
+  dest=$1
+  mkdir -p "$(dirname "$dest")"
+  temp=$(mktemp "${dest}.XXXXXX") || return 1
+  cat > "$temp"
+  if [ -f "$dest" ] && cmp -s "$temp" "$dest"; then
+    rm -f "$temp"
+  else
+    mv -f "$temp" "$dest"
+  fi
+}
+
+# Restricted plain KEY=value allow-list dotenv format
 read_config() {
-  [ -f "$ROOT/$CONF" ] || return 0
+  [ -f "$CONF" ] || return 0
   while IFS='=' read -r key value || [ -n "$key" ]; do
     case $key in ''|\#*) continue;; esac
-    # Restricted plain KEY=value format, not shell source; values cannot run commands.
     case $key in
-      alpine_version) ALPINE_VERSION=$value;;
-      alpine_revision) ALPINE_REVISION=$value;;
-      alpine_mirror) ALPINE_MIRROR=$value;;
-      git_user) GIT_USER=$value;; git_email) GIT_EMAIL=$value;;
-      git_import) GIT_IMPORT=$value;;
-      storage) STORAGE=$value;; memory_mb) VM_MEMORY=$value;; cpus) VM_CPUS=$value;; disk_size) VM_SIZE=$value;;
-      ssh_port) SSH_PORT=$value;; forgejo_port) FORGEJO_PORT=$value;;
-      squid_port) SQUID_PORT=$value;; squid_models_port) SQUID_MODELS_PORT=$value;;
-      network_work) NETWORK_WORK=$value;; models) MODELS=$value;;
-      boot_timeout) BOOT_TIMEOUT=$value;;
-      runtime_unsafe) RUNTIME_UNSAFE=$value;;
-      runtime_offline) RUNTIME_OFFLINE=$value;;
-      runtime_models) RUNTIME_MODELS=$value;;
-      forgejo_package) FORGEJO_PACKAGE=$value;;
+      alpine_version) ALPINE_VERSION=$value ;;
+      alpine_revision) ALPINE_REVISION=$value ;;
+      alpine_mirror) ALPINE_MIRROR=$value ;;
+      git_user) GIT_USER=$value ;;
+      git_email) GIT_EMAIL=$value ;;
+      git_import) GIT_IMPORT=$value ;;
+      storage) STORAGE=$value ;;
+      memory_mb) VM_MEMORY=$value ;;
+      cpus) VM_CPUS=$value ;;
+      disk_size) VM_SIZE=$value ;;
+      ssh_port) SSH_PORT=$value ;;
+      forgejo_port) FORGEJO_PORT=$value ;;
+      squid_port) SQUID_PORT=$value ;;
+      squid_models_port) SQUID_MODELS_PORT=$value ;;
+      network_work) NETWORK_WORK=$value ;;
+      models) MODELS=$value ;;
+      boot_timeout) BOOT_TIMEOUT=$value ;;
+      runtime_unsafe) RUNTIME_UNSAFE=$value ;;
+      runtime_offline) RUNTIME_OFFLINE=$value ;;
+      runtime_models) RUNTIME_MODELS=$value ;;
+      forgejo_package) FORGEJO_PACKAGE=$value ;;
       *) : ;; # Unknown keys are deliberately ignored and preserved.
     esac
-  done < "$ROOT/$CONF"
+  done < "$CONF"
 }
+
 validate_config() {
-  valid_version "$ALPINE_VERSION" || die 'Invalid alpine_version'
-  case $ALPINE_REVISION in r[0-9]*) case ${ALPINE_REVISION#r} in *[!0-9]*|'') die 'Invalid alpine_revision';; esac;; *) die 'Invalid alpine_revision';; esac
-  case $ALPINE_MIRROR in https://*) :;; *) die 'Alpine mirror must use HTTPS';; esac
-  case $ALPINE_MIRROR in *[!a-zA-Z0-9/_.:-]*) die 'Invalid Alpine mirror URL';; esac
-  case $STORAGE in ephemeral|persistent) :;; *) die 'storage must be ephemeral or persistent';; esac
-  case $GIT_IMPORT in snapshot|shallow|full) :;; *) die 'git_import must be snapshot, shallow, or full';; esac
-  case $NETWORK_WORK in offline|models) :;; *) die 'network_work must be offline or models';; esac
-  case $BOOT_TIMEOUT in ''|*[!0-9]*) die 'boot_timeout must be 0-30 seconds';; esac
-  [ "$BOOT_TIMEOUT" -le 30 ] || die 'boot_timeout must be 0-30 seconds'
+  valid_version "$ALPINE_VERSION" || panic $EX_CONFIG 'Invalid alpine_version'
+  case $ALPINE_REVISION in
+    r[0-9]*)
+      case ${ALPINE_REVISION#r} in
+        *[!0-9]*|'') panic $EX_CONFIG 'Invalid alpine_revision' ;;
+      esac
+    ;;
+    *) panic $EX_CONFIG 'Invalid alpine_revision' ;;
+  esac
+  case $ALPINE_MIRROR in
+    https://*) : ;;
+    *) panic $EX_CONFIG 'Alpine mirror must use HTTPS' ;;
+  esac
+  case $ALPINE_MIRROR in
+    *[!a-zA-Z0-9/_.:-]*) panic $EX_CONFIG 'Invalid Alpine mirror URL' ;;
+  esac
+  case $STORAGE in
+    ephemeral|persistent) : ;;
+    *) panic $EX_CONFIG 'storage must be ephemeral or persistent' ;;
+  esac
+  case $GIT_IMPORT in
+    snapshot|shallow|full) : ;;
+    *) panic $EX_CONFIG 'git_import must be snapshot, shallow, or full' ;;
+  esac
+  case $NETWORK_WORK in
+    offline|models) : ;;
+    *) panic $EX_CONFIG 'network_work must be offline or models' ;;
+  esac
+  case $BOOT_TIMEOUT in
+    ''|*[!0-9]*) panic $EX_CONFIG 'boot_timeout must be 0-30 seconds' ;;
+  esac
+  [ "$BOOT_TIMEOUT" -le 30 ] || panic $EX_CONFIG 'boot_timeout must be 0-30 seconds'
   for selected in "$RUNTIME_UNSAFE" "$RUNTIME_OFFLINE" "$RUNTIME_MODELS"; do
-    case $selected in crun|runsc) :;; *) die "Unsupported OCI runtime: $selected (expected crun or runsc)";; esac
+    case $selected in
+      crun|runsc) : ;;
+      *) panic $EX_CONFIG "Unsupported OCI runtime: $selected (expected crun or runsc)" ;;
+    esac
   done
-  case $FORGEJO_PACKAGE in forgejo|forgejo-lts) :;; *) die 'unsupported Forgejo package';; esac
-  valid_list "$MODELS" || die 'models must be comma-separated identifiers'
-  for n in "$SSH_PORT" "$FORGEJO_PORT" "$SQUID_PORT" "$SQUID_MODELS_PORT"; do valid_port "$n" || die "invalid port $n"; done
-  for n in "$VM_MEMORY" "$VM_CPUS"; do case $n in ''|*[!0-9]*) die "invalid integer $n";; esac; [ "$n" -gt 0 ] || die 'values must be positive'; done
-  case $VM_SIZE in *[!0-9GM]*) die 'disk_size must be an integer followed by G or M';; esac
-  case $GIT_USER$GIT_EMAIL in *'\n'*|*'\r'*) die 'invalid Git identity';; esac
+  case $FORGEJO_PACKAGE in
+    forgejo|forgejo-lts) : ;;
+    *) panic $EX_CONFIG 'unsupported Forgejo package' ;;
+  esac
+  valid_list "$MODELS" || panic $EX_CONFIG 'models must be comma-separated identifiers'
+  for n in "$SSH_PORT" "$FORGEJO_PORT" "$SQUID_PORT" "$SQUID_MODELS_PORT"; do
+    valid_port "$n" || panic $EX_CONFIG "invalid port $n"
+  done
+  for n in "$VM_MEMORY" "$VM_CPUS"; do
+    case $n in
+      ''|*[!0-9]*) panic $EX_CONFIG "invalid integer $n" ;;
+    esac
+    [ "$n" -gt 0 ] || panic $EX_CONFIG 'values must be positive'
+  done
+  case $VM_SIZE in
+    *[!0-9GM]*) panic $EX_CONFIG 'disk_size must be an integer followed by G or M' ;;
+  esac
+  case $GIT_USER$GIT_EMAIL in
+    *'\n'*|*'\r'*) panic $EX_CONFIG 'invalid Git identity' ;;
+  esac
   # Model policies never accept arbitrary proxy targets from inside the guest.
-  saved_ifs=$IFS; IFS=,; set -- $MODELS; IFS=$saved_ifs
-  for model do case $model in ''|ollama|anthropic|openai|openrouter) :;; *) die "unknown model provider: $model";; esac; done
+  saved_ifs=$IFS; IFS=,; set -- "$MODELS"; IFS=$saved_ifs
+  for model do
+    case $model in
+      ''|ollama|anthropic|openai|openrouter) : ;;
+      *) panic $EX_CONFIG "unknown model provider: $model" ;;
+    esac
+  done
 }
-load() { read_config; validate_config; }
-ensure_dirs() { mkdir -p "$IMAGES" "$VMS" "$SEEDS" "$SECRETS" "$SHARED" "$TMP" "$PROXY" "$SYNC"; }
+
+load_conf() {
+  read_config
+  validate_config
+}
+
+ensure_dirs() {
+  mkdir -p "$STORE" "$IMAGES" "$VMS" "$SEEDS" "$SECRETS" "$SHARED" "$TMP" "$PROXY" "$SYNC" "$OCI_STORE"
+}
+
 init_conf() {
-  if [ ! -f "$ROOT/$CONF" ]; then
-    cat > "$ROOT/$CONF" <<'EOF_CONF'
+  if [ ! -f "$CONF" ]; then
+    # config_upgrade
+    cat > "$CONF" <<'EOF_CONF'
 # Firebreak configuration, plain KEY=value (not a shell script).
 # Keys not recognized by this version are preserved when updating.
 alpine_version=3.24.1
@@ -158,7 +368,7 @@ alpine_mirror=https://dl-cdn.alpinelinux.org/alpine
 storage=ephemeral
 network_work=offline
 boot_timeout=0
-runtime_unsafe=crun
+runtime_unsafe=runsc
 runtime_offline=runsc
 runtime_models=runsc
 models=ollama
@@ -170,19 +380,21 @@ squid_models_port=3129
 memory_mb=10240
 cpus=4
 disk_size=60G
-git_user=Firebreak Agent
-git_email=agent@firebreak.invalid
+git_user=Sandbox Guest
+git_email=guest@firebreak.invalid
 git_import=snapshot
 EOF_CONF
-    chmod 600 "$ROOT/$CONF"
+    chmod 600 "$CONF"
   fi
 }
+
 ensure_ignored() {
   if [ ! -e "$ROOT/.gitignore" ]; then : > "$ROOT/.gitignore"; fi
-  for pattern in '.devcontainer/firebreak/' '.env'; do
+  for pattern in "$STORE_NAME/*" "!$STORE_NAME/compose.*" "!$STORE_NAME/Dockerfile*" "!$STORE_NAME/$CONF_NAME" '.env'; do
     grep -Fqx "$pattern" "$ROOT/.gitignore" || printf '%s\n' "$pattern" >> "$ROOT/.gitignore"
   done
 }
+
 ensure_editorconfig() {
   if [ ! -f "$ROOT/.editorconfig" ]; then
     cat > "$ROOT/.editorconfig" <<'EOF_EDITORCFG'
@@ -199,11 +411,13 @@ insert_final_newline = true
 EOF_EDITORCFG
   fi
 }
-ssh_opts() { # calls should use positional array construction via set --, never word-splitting
-  :
-}
-vm_paths() {
-  valid_name "$1" || die "invalid sandbox name: $1"
+
+# ssh_opts() { # calls should use positional array construction via set --, never word-splitting
+#   :
+# }
+
+configure_vm_paths() {
+  valid_name "$1" || panic $EX_DATAERR "invalid sandbox name: $1"
   NAME=$1
   DISK=$VMS/$NAME.qcow2
   SEED=$SEEDS/$NAME
@@ -215,22 +429,30 @@ vm_paths() {
   ACTIVE_MODE=$TMP/$NAME.active-network-mode
   SYNC_DIR=$SYNC/$NAME
 }
+
 ensure_keys() {
-  need ssh-keygen
+  require ssh-keygen
   mkdir -p "$SECRET"
   if [ ! -f "$CLIENT" ]; then ssh-keygen -q -t ed25519 -N '' -f "$CLIENT"; fi
   if [ ! -f "$HOSTKEY" ]; then ssh-keygen -q -t ed25519 -N '' -f "$HOSTKEY"; fi
   # Local VM console recovery: random per-sandbox credential, not an SSH password.
   if [ ! -f "$SECRET/console-password" ]; then rand_hex 16 > "$SECRET/console-password"; fi
   if [ ! -f "$SECRET/forgejo-password" ]; then rand_hex 24 > "$SECRET/forgejo-password"; fi
+  if [ ! -f "$SECRET/forgejo-worker-password" ]; then rand_hex 24 > "$SECRET/forgejo-worker-password"; fi
   if [ ! -f "$SECRET/forgejo-secret" ]; then rand_hex 32 > "$SECRET/forgejo-secret"; fi
   if [ ! -f "$SECRET/forgejo-internal-token" ]; then rand_hex 24 > "$SECRET/forgejo-internal-token"; fi
   chmod 700 "$SECRET"
-  chmod 600 "$CLIENT" "$HOSTKEY" "$SECRET/console-password" "$SECRET/forgejo-password" "$SECRET/forgejo-secret" "$SECRET/forgejo-internal-token"
+  chmod 600 "$CLIENT" "$HOSTKEY" \
+    "$SECRET/console-password" \
+    "$SECRET/forgejo-password" \
+    "$SECRET/forgejo-worker-password" \
+    "$SECRET/forgejo-secret" \
+    "$SECRET/forgejo-internal-token"
   # A known_hosts entry is pinned to our generated guest host key, not TOFU.
   awk -v p="[127.0.0.1]:$SSH_PORT" '{print p, $1, $2}' "$HOSTKEY.pub" | write_if_changed "$KNOWN"
   chmod 600 "$KNOWN"
 }
+
 # A single-generation file is safe to update; each instance has its own seed.
 render_network() {
   cat <<EOF_NETWORK
@@ -244,49 +466,30 @@ ethernets:
     dhcp6: false
 EOF_NETWORK
 }
+
 render_meta() { printf 'instance-id: firebreak-%s\nlocal-hostname: firebreak-%s\n' "$NAME" "$NAME"; }
 
 # Preserve the exact original firmware version and machine version on Apple Silicon.
-image_name() { printf 'generic_alpine-%s-aarch64-uefi-cloudinit-%s.qcow2' "$ALPINE_VERSION" "$ALPINE_REVISION"; }
-image_url() { series=$(printf '%s' "$ALPINE_VERSION" | awk -F. '{print "v" $1 "." $2}'); printf '%s/%s/releases/cloud/%s' "${ALPINE_MIRROR%/}" "$series" "$(image_name)"; }
+image_name() {
+  printf 'generic_alpine-%s-aarch64-uefi-cloudinit-%s.qcow2' "$ALPINE_VERSION" "$ALPINE_REVISION"
+}
+
+image_url() {
+  series=$(printf '%s' "$ALPINE_VERSION" | awk -F. '{print "v" $1 "." $2}')
+  printf '%s/%s/releases/cloud/%s' "${ALPINE_MIRROR%/}" "$series" "$(image_name)"
+}
+
 require_host() {
-  [ "$(uname -s)" = Darwin ] || die 'VM commands require macOS; config generation and tests also work on Linux'
-  case $(uname -m) in arm64|aarch64) :;; *) die 'Only Apple Silicon supported in this release';; esac
-  need qemu-system-aarch64 qemu
-  need qemu-img qemu
-  need ssh
-  need socat
+  [ "$(uname -s)" = Darwin ] || panic $EX_OSERR 'VM commands require macOS; config generation and tests also work on Linux'
+  case $(uname -m) in
+    arm64|aarch64) : ;;
+    *) panic $EX_OSERR 'Only Apple Silicon supported in this release' ;;
+  esac
+  require qemu-system-aarch64 qemu
+  require qemu-img qemu
+  require ssh
+  require socat
 }
-
-usage() {
-  cat <<'EOF_USAGE'
-Firebreak 0.3: isolated Alpine/aarch64 VM for macOS
-  firebreak config init [--install-deps]
-  firebreak config update [--refresh-image]
-  firebreak sandbox create [--storage=ephemeral|persistent] [--no-boot]
-  firebreak sandbox unsafe                      # VM maintenance shell; Squid filtered
-  firebreak sandbox debug                       # VM serial console + host logs, no SSH prerequisite
-  firebreak sandbox console-password            # Show guest alpine console password locally
-  firebreak sandbox logs [--follow]             # View host-captured serial output
-  firebreak sandbox up                          # restricted VM + local Docker socket
-  firebreak sandbox sh [shell-command ...]       # host shell with DOCKER_HOST
-  firebreak sandbox push [--history=snapshot|shallow|full] [--depth=N]
-  firebreak sandbox pull                         # create host review branch
-  firebreak sandbox snapshot NAME create|restore|delete
-  firebreak sandbox snapshot --list
-  firebreak sandbox delete
-  firebreak sandbox doctor
-  firebreak --self-test | --list | --version | --help
-
-  'sandbox' is a name, not a literal keyword. Examples:
-  firebreak demo create && firebreak demo up
-  firebreak demo snapshot ready create
-  Sandbox names are explicit; VM boot requires Apple Silicon macOS.
-EOF_USAGE
-}
-  # firebreak config proxy-check [--online]        # Proxy syntax/startup; optional gVisor fetch probe
-  # firebreak sandbox provision                   # Resume/finish existing guest provisioning
-  # firebreak sandbox repair                      # Alias: provision (keeps an existing VM disk)
 
 # A standalone, repeatable guest bootstrap. The exact same bytes are embedded
 # in cloud-init and retained on the host for SSH repair after a failed first boot.
@@ -295,12 +498,14 @@ render_gvisor_install() {
 #!/bin/sh
 set -eu
 umask 077
+
 ARCH=$(uname -m)
 URL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}
 PROXY=http://10.0.2.100:3128
 WORK=$(mktemp -d /tmp/firebreak-gvisor.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 cd "$WORK"
+
 # apk installed curl in the preceding packages script. Explicit proxy and
 # --fail/--show-error expose Squid HTTP denials instead of BusyBox wget's
 # unhelpful "error getting response". No direct-network fallback is allowed.
@@ -315,28 +520,36 @@ for file in gvisor.tar.bz2 gvisor.tar.bz2.sha512; do
     }
 done
 sha512sum -c gvisor.tar.bz2.sha512
+
 # Do not install unverified downloads, and keep failed ones out of /usr/local/bin.
 tar -xf gvisor.tar.bz2 -C /usr/local/bin
 chmod a+rx -R /usr/local/bin/runsc \
   /usr/local/bin/containerd-shim-runsc-v1 \
   /usr/local/bin/gvisor-bin/
 /usr/local/bin/runsc install
+
 # Idempotent on explicit repair and on subsequent boots.
 for setting in 'user.max_user_namespaces=7182' 'kernel.yama.ptrace_scope=0' 'kernel.watchdog_thresh=30'; do
   grep -Fxq "$setting" /etc/sysctl.conf || printf '%s\n' "$setting" >> /etc/sysctl.conf
 done
+
 echo 'gVisor: bootstrap completed' >&2
 EOF_GVISOR
 }
 
 render_seed() {
-  vm_paths "$1"
+  configure_vm_paths "$1"
   ensure_dirs
   ensure_keys
   SANDBOX_STORAGE=$STORAGE
-  if [ -f "$SECRET/storage" ]; then SANDBOX_STORAGE=$(cat "$SECRET/storage"); fi
-  case $SANDBOX_STORAGE in ephemeral|persistent) :;; *) die "Invalid saved storage mode";; esac
-  MAC=$(mac_from_string "$VERSION-$BUILD-$NAME")
+  if [ -f "$SECRET/storage" ]; then
+    SANDBOX_STORAGE=$(cat "$SECRET/storage")
+  fi
+  case $SANDBOX_STORAGE in
+    ephemeral|persistent) : ;;
+    *) panic $EX_DATAERR "Invalid saved storage mode" ;;
+  esac
+  MAC=$(mac_from_string "$CLI_VERSION-$BUILD-$NAME")
   mkdir -p "$SEED"
   render_network | write_if_changed "$SEED/network-config"
   render_meta | write_if_changed "$SEED/meta-data"
@@ -360,8 +573,8 @@ users:
     ssh_authorized_keys:
 EOF_CLOUD
     printf '      - %s\n' "$(cat "$CLIENT.pub")"
+printf '  - name: %s\n' "$GUEST_USER"
     cat <<'EOF_CLOUD'
-  - name: alpine
     uid: 1000
     groups: wheel
     shell: /bin/ash
@@ -370,9 +583,9 @@ EOF_CLOUD
 chpasswd:
   expire: false
   users:
-    - name: alpine
-      type: text
 EOF_CLOUD
+    printf '    - name: %s\n' "$GUEST_USER"
+    printf '      type: text\n'
     printf '      password: "%s"\n' "$(cat "$SECRET/console-password")"
     cat <<'EOF_CLOUD'
 ssh_keys:
@@ -387,8 +600,12 @@ growpart:
   mode: auto
   devices: ['/']
 resize_rootfs: true
-mounts:
-  - ['shared', '/mnt/shared', '9p', 'trans=virtio,version=9p2000.L,ro', '0', '0']
+EOF_CLOUD
+    if [ "$SHARE_ENABLED" = 1 ]; then
+      printf 'mounts:\n'
+      printf "  - ['shared', '/mnt/shared', '9p', 'trans=virtio,version=9p2000.L,ro', '0', '0']\n"
+    fi
+    cat <<'EOF_CLOUD'
 write_files:
   - path: /var/lib/cloud/scripts/per-instance/05-firebreak-packages.sh
     permissions: '0755'
@@ -447,7 +664,6 @@ EOF_CLOUD
   chmod 600 "$SEED/reconcile.sh"
 }
 
-
 # Emergency SSH repair is written both to the NoCloud seed disk (for an
 # already-created guest) and to the per-instance first-boot script. This path
 # deliberately does not require host->guest SSH or cloud-init reruns.
@@ -456,6 +672,7 @@ render_ssh_recovery() {
 #!/bin/sh
 set -eu
 umask 077
+
 # Alpine may not read sshd_config.d unless the main config includes it.
 # OpenSSH uses the first value for each global directive, so include Firebreak
 # policy BEFORE any preexisting settings in the main configuration.
@@ -464,12 +681,14 @@ chmod 700 /root /root/.ssh
 if [ ! -f /root/.ssh/authorized_keys ]; then
   : > /root/.ssh/authorized_keys
 fi
+
 EOF_SSH_RECOVER
   printf "if ! grep -Fqx '%s' /root/.ssh/authorized_keys; then\n" "$(cat "$CLIENT.pub")"
   printf "  printf '%%s\\\\n' '%s' >> /root/.ssh/authorized_keys\n" "$(cat "$CLIENT.pub")"
   printf 'fi\n'
   cat <<'EOF_SSH_RECOVER'
 chmod 600 /root/.ssh/authorized_keys
+
 cat > /etc/ssh/sshd_config.d/00-firebreak.conf <<'EOF'
 PermitRootLogin prohibit-password
 PasswordAuthentication no
@@ -480,7 +699,8 @@ AllowTcpForwarding yes
 AllowStreamLocalForwarding yes
 EOF
 chmod 600 /etc/ssh/sshd_config.d/00-firebreak.conf
-# Include must be the FIRST directive to avoid earlier settings winning.
+
+# Include must be the first directive (to avoid earlier settings winning)
 config=/etc/ssh/sshd_config
 first_line=$(sed -n '1p' "$config")
 if [ "$first_line" != 'Include /etc/ssh/sshd_config.d/*.conf' ]; then
@@ -499,6 +719,7 @@ if [ "$first_line" != 'Include /etc/ssh/sshd_config.d/*.conf' ]; then
   mv -f "$tmp" "$config"
 fi
 /usr/sbin/sshd -t
+
 # Verify *effective* daemon settings; merely writing a snippet is insufficient.
 policy=$(/usr/sbin/sshd -T -C user=root,host=localhost,addr=10.0.2.2)
 for required in 'permitrootlogin prohibit-password' \
@@ -511,35 +732,52 @@ for required in 'permitrootlogin prohibit-password' \
   fi
 done
 rc-service sshd restart
+
 printf '%s\n' 'Firebreak SSH recovery: policy verified; root public-key access configured.'
 EOF_SSH_RECOVER
 }
 
 runtime_for_profile() {
   case $1 in
-    unsafe) printf '%s\n' "$RUNTIME_UNSAFE";;
-    offline) printf '%s\n' "$RUNTIME_OFFLINE";;
-    models) printf '%s\n' "$RUNTIME_MODELS";;
-    *) die "Unknown OCI runtime profile: $1";;
+    unsafe) printf '%s\n' "$RUNTIME_UNSAFE" ;;
+    offline) printf '%s\n' "$RUNTIME_OFFLINE" ;;
+    models) printf '%s\n' "$RUNTIME_MODELS" ;;
+    *) panic $EX_SOFTWARE "Unknown OCI runtime profile: $1" ;;
   esac
 }
 
 render_guest_apply() {
   # No shell-interpreted input can contain arbitrary syntax. Output writes the
   # only runtime files we own; it NEVER deletes user files or upgrades packages.
-  case $SANDBOX_STORAGE in ephemeral) OVERLAY=all:memory;; persistent) OVERLAY=none;; esac
+  case $SANDBOX_STORAGE in
+    ephemeral) OVERLAY=all:memory ;;
+    persistent) OVERLAY=none ;;
+  esac
   cat <<'EOF_APPLY'
 #!/bin/sh
 set -eu
 umask 077
+
 profile=${1:?Expected profile}
 selected_runtime=${2:?Expected OCI runtime}
-case $profile in unsafe|models|offline) :;; *) echo "Unexpected profile: $profile" >&2; exit 2;; esac
-case $selected_runtime in crun|runsc) :;; *) echo "Unexpected OCI runtime: $selected_runtime" >&2; exit 2;; esac
-case $profile in unsafe) pull_policy=missing;; *) pull_policy=never;; esac
+
+case $profile in
+  unsafe|models|offline) : ;;
+  *) echo "Unexpected profile: $profile" >&2; exit 2 ;;
+esac
+case $selected_runtime in
+  crun|runsc) : ;;
+  *) echo "Unexpected OCI runtime: $selected_runtime" >&2; exit 2 ;;
+esac
+case $profile in
+  unsafe) pull_policy=missing ;;
+  *) pull_policy=never ;;
+esac
+
 # Avoid boot-time auto-start before Firebreak has selected the OCI runtime.
 rc-update del podman default 2>/dev/null || :
 mkdir -p /etc/containers/containers.conf.d /etc/containers/registries.conf.d /etc/firebreak /etc/profile.d
+
 cat >/usr/local/bin/runsc-custom <<'EOF'
 #!/bin/sh
 EOF_APPLY
@@ -547,6 +785,7 @@ EOF_APPLY
   cat <<'EOF_APPLY'
 EOF
 chmod 755 /usr/local/bin/runsc-custom
+
 policy_file=/etc/containers/containers.conf.d/99-firebreak-runsc.conf
 policy_tmp=$(mktemp "${policy_file}.XXXXXX")
 trap 'rm -f "$policy_tmp"' 0
@@ -558,6 +797,7 @@ trap 'exit 1' 1 2 3 15
 if ! cmp -s "$policy_tmp" "$policy_file"; then
   mv -f "$policy_tmp" "$policy_file"
 fi
+
 # A default-runtime change does not migrate existing containers. In work mode,
 # refuse to reuse unsafe-created crun containers: recreate them under runsc.
 if [ "$profile" != unsafe ] && [ "$selected_runtime" = runsc ]; then
@@ -571,6 +811,7 @@ if [ "$profile" != unsafe ] && [ "$selected_runtime" = runsc ]; then
     fi
   done
 fi
+
 policy_hash=$(sha256sum /usr/local/bin/runsc-custom "$policy_file" | sha256sum | awk '{print $1}')
 previous_hash=$(cat /etc/firebreak/podman-policy-hash 2>/dev/null || true)
 if ! rc-service podman status >/dev/null 2>&1; then
@@ -584,18 +825,20 @@ actual_runtime=$(podman info --format '{{.Host.OCIRuntime.Name}}')
   exit 1
 }
 printf '%s\n' "$policy_hash" > /etc/firebreak/podman-policy-hash
-# The project is intentionally mounted read-only as an explicit guest share.
-mkdir -p /var/lib/firebreak/workspaces
+
 EOF_APPLY
   printf "printf '%%s\\\\n' '%s' > /etc/firebreak/storage\n" "$SANDBOX_STORAGE"
   # Guest-only Forgejo password, never an external provider credential.
   printf "printf '%%s\\\\n' '%s' > /etc/firebreak/forgejo-password\n" "$(cat "$SECRET/forgejo-password")"
+  printf "printf '%%s\\\\n' '%s' > /etc/firebreak/forgejo-worker-password\n" "$(cat "$SECRET/forgejo-worker-password")"
   printf "printf '%%s\\\\n' 'http://firebreak:%s@127.0.0.1:%s' > /etc/firebreak/forgejo-credentials\n" \
     "$(cat "$SECRET/forgejo-password")" "$FORGEJO_PORT"
   cat <<'EOF_APPLY'
-chmod 600 /etc/firebreak/forgejo-password /etc/firebreak/forgejo-credentials
+chmod 600 /etc/firebreak/forgejo-password /etc/firebreak/forgejo-worker-password /etc/firebreak/forgejo-credentials
 EOF_APPLY
+  printf 'FIREBREAK_WORKER_PORT=%s\n' "$FORGEJO_PORT"
   cat <<'EOF_APPLY'
+
 # Forgejo packaging has a dedicated forgejo:www-data user on Alpine.
 if command -v forgejo >/dev/null 2>&1; then
   mkdir -p /etc/forgejo /var/lib/forgejo /var/log/forgejo
@@ -606,9 +849,11 @@ if command -v forgejo >/dev/null 2>&1; then
   cat > /etc/forgejo/app.ini.firebreak-new <<'EOF'
 APP_NAME = Firebreak
 RUN_MODE = prod
+
 [database]
 DB_TYPE = sqlite3
 PATH = /var/lib/forgejo/data/forgejo.db
+
 [server]
 HTTP_ADDR = 0.0.0.0
 EOF_APPLY
@@ -616,17 +861,22 @@ EOF_APPLY
   cat <<'EOF_APPLY'
 DISABLE_SSH = true
 OFFLINE_MODE = true
+
 [security]
 INSTALL_LOCK = true
 EOF_APPLY
   printf 'SECRET_KEY = %s\n' "$(cat "$SECRET/forgejo-secret")"
   cat <<'EOF_APPLY'
+
 [service]
 DISABLE_REGISTRATION = true
 REQUIRE_SIGNIN_VIEW = false
 ENABLE_NOTIFY_MAIL = false
+
 [repository]
 DEFAULT_PRIVATE = private
+# Generate POSIX-compliant /bin/sh hooks
+SCRIPT_TYPE = sh
 EOF
   chown forgejo:www-data /etc/forgejo/app.ini.firebreak-new
   chmod 640 /etc/forgejo/app.ini.firebreak-new
@@ -636,6 +886,7 @@ EOF
   else
     rm -f /etc/forgejo/app.ini.firebreak-new
   fi
+
   if [ ! -f /etc/firebreak/forgejo-initialized ]; then
     # Run once, *as the package's service user*, never as root.
     su -s /bin/sh forgejo -c 'forgejo --work-path /var/lib/forgejo --config /etc/forgejo/app.ini migrate'
@@ -650,6 +901,108 @@ EOF_APPLY
   else
     rc-service forgejo status >/dev/null 2>&1 || rc-service forgejo start
   fi
+
+  # The worker is a non-admin, isolated Forgejo identity. Its generated
+  # password is only a provisioning/recovery credential. A second phase
+  # after Git import grants repo access.
+  worker_api="http://127.0.0.1:$FIREBREAK_WORKER_PORT/api/v1"
+  worker_pass=$(cat /etc/firebreak/forgejo-worker-password)
+  # OpenRC may report started before Forgejo's HTTP listener is ready.
+  worker_code=000
+  worker_try=0
+  while [ "$worker_try" -lt 30 ]; do
+    worker_code=$(curl -sS --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}'       -u "firebreak:$(cat /etc/firebreak/forgejo-password)"       "$worker_api/users/sbx-worker" 2>/dev/null) || worker_code=000
+    case $worker_code in
+      200|404) break ;;
+      000) : ;;
+      *) break ;;
+    esac
+    worker_try=$((worker_try + 1))
+    sleep 1
+  done
+  case "$worker_code" in
+    404)
+      # Static arguments; the password is generated hex, never shell input.
+      su -s /bin/sh forgejo -c \
+        "forgejo --work-path /var/lib/forgejo --config /etc/forgejo/app.ini admin user create --username sbx-worker --email sbx-worker@firebreak.invalid --password $worker_pass --must-change-password=false"
+      ;;
+    200) : ;;
+    *) echo "Forgejo worker lookup failed: HTTP $worker_code" >&2; exit 1 ;;
+  esac
+
+  # If interrupted between creation and marking success, the worker may
+  # already exist. Only adopt it if the Firebreak-managed password works.
+  verified=$(curl -fsS -u "sbx-worker:$worker_pass" "$worker_api/user") || {
+    echo 'Existing sbx-worker is not the Firebreak-managed account' >&2; exit 1;
+  }
+  printf '%s' "$verified" | grep -Eq '"login"[[:space:]]*:[[:space:]]*"sbx-worker"' || exit 1
+  if printf '%s' "$verified" | grep -Eq '"is_admin"[[:space:]]*:[[:space:]]*true'; then
+    echo 'Refusing privileged Forgejo worker account' >&2; exit 1
+  fi
+
+  # The Forgejo CLI runs under its own service UID; never leak token to log.
+  if [ ! -s /etc/firebreak/forgejo-worker-token ]; then
+    # Forgejo CLI versions accept --scopes (older) or --scope (newer).
+    token_help=$(su -s /bin/sh forgejo -c \
+      'forgejo --work-path /var/lib/forgejo --config /etc/forgejo/app.ini admin user generate-access-token --help' 2>&1) || {
+      echo 'Cannot inspect Forgejo token-generation options' >&2; exit 1;
+    }
+    case "$token_help" in
+      *--scopes*) scope_option='--scopes write:repository' ;;
+      *--scope*)  scope_option='--scope write:repository' ;;
+      *) echo 'Forgejo cannot create a repository-scoped worker token' >&2; exit 1 ;;
+    esac
+    token_tmp=$(mktemp /etc/firebreak/forgejo-worker-token.XXXXXX)
+    if ! su -s /bin/sh forgejo -c \
+      "forgejo --work-path /var/lib/forgejo --config /etc/forgejo/app.ini admin user generate-access-token --username sbx-worker --token-name firebreak-git $scope_option --raw" > "$token_tmp"; then
+      rm -f "$token_tmp"
+      echo 'Could not create Forgejo worker access token' >&2; exit 1
+    fi
+    [ -s "$token_tmp" ] || { rm -f "$token_tmp"; exit 1; }
+    tr -d '\r\n' < "$token_tmp" > "$token_tmp.clean"
+    mv -f "$token_tmp.clean" /etc/firebreak/forgejo-worker-token
+    rm -f "$token_tmp"
+  fi
+  chmod 600 /etc/firebreak/forgejo-worker-token
+
+  # A stable VM-local capability for project-owned Compose configurations.
+  # It contains only the NON-ADMIN worker token, never admin credentials.
+  # Allow traversal of /var/lib/firebreak without exposing its directory list.
+  [ ! -L /var/lib/firebreak ] || { echo 'Refusing symlinked Firebreak state' >&2; exit 1; }
+  [ ! -L /var/lib/firebreak/worker-runtime ] || { echo 'Refusing symlinked worker runtime' >&2; exit 1; }
+  run=/var/lib/firebreak/worker-runtime
+  mkdir -p "$run"
+  chmod 711 /var/lib/firebreak "$run"
+  cred_tmp=$(mktemp "$run/credentials.XXXXXX")
+  token=$(cat /etc/firebreak/forgejo-worker-token)
+  printf 'http://sbx-worker:%s@127.0.0.1:%s\n' "$token" "$FIREBREAK_WORKER_PORT" > "$cred_tmp"
+  printf 'http://sbx-worker:%s@host.containers.internal:%s\n' "$token" "$FIREBREAK_WORKER_PORT" >> "$cred_tmp"
+  unset token
+  if [ -f "$run/git-credentials" ] && cmp -s "$cred_tmp" "$run/git-credentials"; then
+    rm -f "$cred_tmp"
+  else
+    mv -f "$cred_tmp" "$run/git-credentials"
+  fi
+  # Existing Compose projects use UID 1000. Projects running as another UID
+  # can choose a different credential delivery method in their own Compose.
+  chown 1000:1000 "$run/git-credentials"
+  chmod 400 "$run/git-credentials"
+  helper_tmp=$(mktemp "$run/helper.XXXXXX")
+  cat > "$helper_tmp" <<'EOF_WORKER_HELPER'
+#!/bin/sh
+case ${1:-} in
+  get) exec git credential-store --file="${FIREBREAK_GIT_CREDS:-/run/firebreak/git-credentials}" get ;;
+  store|erase) cat >/dev/null ;;
+  *) exit 1 ;;
+esac
+EOF_WORKER_HELPER
+  if [ -f "$run/git-credential-helper" ] && cmp -s "$helper_tmp" "$run/git-credential-helper"; then
+    rm -f "$helper_tmp"
+  else
+    mv -f "$helper_tmp" "$run/git-credential-helper"
+  fi
+  chown 0:0 "$run/git-credential-helper"
+  chmod 555 "$run/git-credential-helper"
 fi
 EOF_APPLY
 ### Reconciled per boot, but generated configuration changes only when needed.
@@ -705,13 +1058,13 @@ index.docker.io
 production.cloudfront.docker.com
 ghcr.io
 pkg-containers.githubusercontent.com
-pypi.org
-files.pythonhosted.org
+#pypi.org
+#files.pythonhosted.org
 archive.ubuntu.com
 security.ubuntu.com
 ports.ubuntu.com
 deb.debian.org
-releases.astral.sh
+#releases.astral.sh
 
 #.github.com
 #github.com
@@ -739,15 +1092,21 @@ nonexistent.firebreak.invalid
 .wikipedia.org
 .readthedocs.io
 developer.mozilla.org
-docs.python.org
-docs.astral.sh
+#docs.python.org
+#docs.astral.sh
 #mui.com
 #react.dev
 EOF_MODEL_DOMAINS
-  # printf '%s\n' 'nonexistent.firebreak.invalid' >> "$PROXY/model-domains"
-  case ,$MODELS, in *,anthropic,*) printf '%s\n' 'api.anthropic.com' >> "$PROXY/model-domains";; esac
-  case ,$MODELS, in *,openai,*) printf '%s\n' 'api.openai.com' >> "$PROXY/model-domains";; esac
-  case ,$MODELS, in *,openrouter,*) printf '%s\n' 'openrouter.ai' >> "$PROXY/model-domains";; esac
+  printf '%s\n' 'nonexistent.firebreak.invalid' >> "$PROXY/model-domains"
+  case ,$MODELS, in
+    *,anthropic,*) printf '%s\n' 'api.anthropic.com' >> "$PROXY/model-domains" ;;
+  esac
+  case ,$MODELS, in
+    *,openai,*) printf '%s\n' 'api.openai.com' >> "$PROXY/model-domains" ;;
+  esac
+  case ,$MODELS, in
+    *,openrouter,*) printf '%s\n' 'openrouter.ai' >> "$PROXY/model-domains" ;;
+  esac
   # User-defined overrides live separately and must be edited deliberately.
   [ -f "$PROXY/setup-extra" ] || : > "$PROXY/setup-extra"
   [ -f "$PROXY/models-extra" ] || : > "$PROXY/models-extra"
@@ -788,48 +1147,75 @@ access_log stdio:access.log
 EOF_PROXY
   chmod 600 "$PROXY"/*
 }
-config_cmd() {
-  action=${1:-}; shift || true
+
+cmd_config() {
+  action=${1:-}
+  shift || true
   case $action in
     init)
-      init_conf; load; ensure_dirs; ensure_ignored; render_proxy_config
+      ensure_dirs
+      init_conf
+      load_conf
+      ensure_ignored
+      ensure_editorconfig
+      render_proxy_config
+
       if [ "${1:-}" = --install-deps ]; then
-        [ "$(uname -s)" = Darwin ] || die 'brew install is only available on macOS'
-        need brew
+        [ "$(uname -s)" = Darwin ] || panic $EX_OSERR 'brew install is only available on macOS'
+        require brew
         brew install qemu socat squid gnupg coreutils
-      elif [ "$#" -ne 0 ]; then die "unknown argument: $1"; fi
-      say "Initialized $CONF and $STORE (no VM created)."
+      elif [ "$#" -ne 0 ]; then
+        panic $EX_USAGE "unknown argument: $1"
+      fi
+      info "Initialized $CONF and $STORE (no VM created)."
       ;;
-    update|upgrade)
-      [ -f "$ROOT/$CONF" ] || die 'Run config init first'
-      load; ensure_dirs; ensure_ignored
-      if [ "${1:-}" = --refresh-image ]; then
+    apply|upgrade)
+      [ -f "$CONF" ] || panic $EX_NOINPUT 'Run config init first'
+      ensure_dirs
+      load_conf
+      ensure_ignored
+
+      if [ "$#" -ne 0 ]; then
+        panic $EX_USAGE "unknown argument: $1"
+      fi
+      if [ "$action" = "upgrade" ]; then
         # Discover the highest available revision of the exact configured release.
-        need curl; need sort; need sed
-        page=$(curl -fsSL "${ALPINE_MIRROR%/}/v$(printf %s "$ALPINE_VERSION" | cut -d. -f1-2)/releases/cloud/") || die 'Unable to query Alpine cloud image index'
+        require curl
+        require sort
+        require sed
+
+        page=$(curl -fsSL "${ALPINE_MIRROR%/}/v$(printf %s "$ALPINE_VERSION" | cut -d. -f1-2)/releases/cloud/") || panic $EX_PROTOCOL 'Unable to query Alpine cloud image index'
         latest=$(printf '%s\n' "$page" | grep -o "generic_alpine-${ALPINE_VERSION}-aarch64-uefi-cloudinit-r[0-9][0-9]*.qcow2" | sort -u | sed 's/.*-r\([0-9][0-9]*\).qcow2/r\1/' | sort -t r -k2,2n | tail -n 1)
-        [ -n "$latest" ] || die 'No matching cloud image revision in index'
+        [ -n "$latest" ] || panic $EX_CONFIG 'No matching cloud image revision in index'
         if [ "$latest" != "$ALPINE_REVISION" ]; then
           # Keep all unknown keys, comments and user changes untouched.
-          sed "s/^alpine_revision=.*/alpine_revision=$latest/" "$ROOT/$CONF" | write_if_changed "$ROOT/$CONF"
+          sed "s/^alpine_revision=.*/alpine_revision=$latest/" "$CONF" | write_if_changed "$CONF"
           ALPINE_REVISION=$latest
         fi
-      elif [ "$#" -ne 0 ]; then die "unknown argument: $1"; fi
+      fi
       render_proxy_config
       for disk in "$VMS"/*.qcow2; do
         [ -f "$disk" ] || continue
-        base=${disk##*/}; vm_paths "${base%.qcow2}"
-        [ ! -d "$disk.lock" ] || die "Stop sandbox $NAME before updating its seed"
+        base=${disk##*/}
+        configure_vm_paths "${base%.qcow2}"
+        [ ! -d "$disk.lock" ] || panic $EX_USAGE "Stop sandbox $NAME before updating its seed"
         render_seed "$NAME"
       done
-      say 'Configuration reconciled on disk; guest runtime policies apply on next VM start.'
-      ;;
+      info 'Configuration reconciled on disk; guest runtime policies apply on next VM start.'
+    ;;
     proxy-check)
-      case ${1:-} in ''|--online) :;; *) die 'proxy-check accepts only --online';; esac
-      [ "$#" -le 1 ] || die 'proxy-check accepts only --online'
+      case ${1:-} in
+        ''|--online) : ;;
+        *) panic $EX_USAGE 'proxy-check accepts only --online' ;;
+      esac
+      [ "$#" -le 1 ] || panic $EX_USAGE 'proxy-check accepts only --online'
       online=${1:-no}
-      [ -f "$ROOT/$CONF" ] || die 'Run config init first'
-      load; ensure_dirs; render_proxy_config
+      [ -f "$CONF" ] || panic $EX_NOINPUT 'Run config init first'
+
+      ensure_dirs
+      load_conf
+      render_proxy_config
+
       # Isolated subshell: the real VM supervisor's PID/trap state is untouched.
       (
         SQUID_PID=
@@ -839,126 +1225,123 @@ config_cmd() {
         trap 'exit 143' TERM
         start_squid
         if [ "$online" = --online ]; then
-          need curl
-          say 'Testing the actual setup proxy against the gVisor release endpoint...'
+          require curl
+          info 'Testing the actual setup proxy against the gVisor release endpoint...'
           if ! curl --fail --show-error --silent --head --location \
               --connect-timeout 20 --max-time 40 \
               --proxy "http://127.0.0.1:$SQUID_PORT" --noproxy '' \
               'https://storage.googleapis.com/gvisor/releases/release/latest/aarch64/gvisor.tar.bz2' \
               > "$PROXY/online-check.log" 2>&1; then
-            say 'Proxy online check failed:'
+            warn 'Proxy online check failed:'
             tail -n 15 "$PROXY/online-check.log" >&2 || :
-            say 'Recent Squid transactions:'
+            warn 'Recent Squid transactions:'
             tail -n 15 "$PROXY/access.log" >&2 2>/dev/null || :
-            die 'Setup proxy cannot reach gVisor (no VM needed)'
+            panic $EX_IOERR 'Setup proxy cannot reach gVisor (no VM needed)'
           fi
-          say 'gVisor endpoint reachable through Squid.'
+          info 'gVisor endpoint reachable through Squid.'
         fi
-        say 'Squid policy and foreground startup OK; test process stopped.'
+        info 'Squid policy and foreground startup OK; test process stopped.'
       )
-      ;;
-    *) die 'Expected: config init|update|proxy-check';;
+    ;;
+    *) panic $EX_USAGE 'Expected: config init|apply|upgrade' ;;
+    # *) panic $EX_USAGE 'Expected: config init|apply|upgrade|proxy-check';;
   esac
 }
 
-  verify_gpg_signature() (
-    fingerprint=$1
-    keyfile=$2
-    sig=$3
-    bin=$4
+verify_gpg_signature() {
+  fingerprint=$1
+  keyfile=$2
+  sig=$3
+  bin=$4
 
-    # Normalize fingerprint: remove whitespace, uppercase hex.
-    expected=$(printf '%s' "$fingerprint" |
-      tr -d '[:space:]' |
-      tr '[:lower:]' '[:upper:]')
+  # Normalize fingerprint: remove whitespace, uppercase hex.
+  expected=$(printf '%s' "$fingerprint" |
+    tr -d '[:space:]' |
+    tr '[:lower:]' '[:upper:]')
 
-    # Reject malformed fingerprints.
-    case "$expected" in
-      *[!0123456789ABCDEF]*|'')
-        die "Invalid fingerprint"
-      ;;
-    esac
+  # Reject malformed fingerprints.
+  case "$expected" in
+    *[!0123456789ABCDEF]*|'') panic $EX_SOFTWARE "Invalid fingerprint" ;;
+  esac
 
-    case ${#expected} in
-      40|64) ;;
-      *)
-        die "Unexpected fingerprint length"
-      ;;
-    esac
+  case ${#expected} in
+    40|64) ;;
+    *) panic $EX_SOFTWARE "Unexpected fingerprint length" ;;
+  esac
 
-    # Isolated GPG environment.
-    tmpdir=$(mktemp -d) || die "could not create temp directory"
-    trap 'rm -rf "$tmpdir"' 0
-    trap 'exit 1' 1 2 3 15
+  # Isolated GPG environment.
+  tmpdir=$(mktemp -d) || panic $EX_CANTCREAT "could not create temp directory"
+  trap 'rm -rf "$tmpdir"' 0
+  trap 'exit 1' 1 2 3 15
 
-    chmod 700 "$tmpdir" || die "could not chmod temp directory"
+  chmod 700 "$tmpdir" || panic $EX_CANTCREAT "could not chmod temp directory"
 
-    # Import the supplied public key
-    gpg --homedir "$tmpdir" --batch --no-tty \
-      --import "$keyfile" || die "pubkey import failed"
+  # Import the supplied public key
+  gpg --homedir "$tmpdir" --batch --no-tty \
+    --import "$keyfile" || panic $EX_SOFTWARE "pubkey import failed"
 
-    actual=$(
-      gpg --homedir "$tmpdir" --batch --with-colons --fingerprint --list-keys |
-      awk -F: '
-        $1 == "pub" {
-          count++
-          want_fpr = 1
-          next
-        }
-        $1 == "fpr" && want_fpr {
-          fingerprint = $10
-          want_fpr = 0
-        }
-        END {
-          if (count != 1 || fingerprint == "")
-            exit 1
-          print fingerprint
-        }
-      '
-    ) || die "could not extract exactly one required primary-key fingerprint"
-
-    if [ "$actual" != "$expected" ]; then
-      echo "Key fingerprint mismatch!" >&2
-      echo "Expected: $expected" >&2
-      echo "Actual:   $actual" >&2
-      die
-    fi
-
-    # Cryptographically verify the signature, we trust it because we do
-    # our own explicit fingerprint validation and have obtained both
-    # fingerprint and public key by hand.
-    # Keeping the machine-readable status for the next check.
-    if ! gpg --homedir "$tmpdir" --batch --no-tty \
-      --trust-model always --assert-signer "$expected" --quiet \
-      --status-fd 1 --verify "$sig" "$bin" \
-      > "$tmpdir/status"
-    then
-      die "Signature verification failed!"
-    fi
-
-    # Verify the signer's primary-key fingerprint.
-    # Require exactly one valid signature from our expected key.
-    if ! awk -v expected="$expected" '
-      $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+  actual=$(
+    gpg --homedir "$tmpdir" --batch --with-colons --fingerprint --list-keys |
+    awk -F: '
+      $1 == "pub" {
         count++
-        # Last field is the primary-key fingerprint.
-        # Fall back to signing-key fingerprint if absent.
-        primary = (NF >= 12 ? $12 : $3)
-        if (primary != expected)
-          mismatch = 1
+        want_fpr = 1
+        next
+      }
+      $1 == "fpr" && want_fpr {
+        fingerprint = $10
+        want_fpr = 0
       }
       END {
-        if (count != 1 || mismatch)
+        if (count != 1 || fingerprint == "")
           exit 1
+        print fingerprint
       }
-      ' "$tmpdir/status"
-    then
-      die "Signature signer mismatch!"
-    fi
+    '
+  ) || panic $EX_SOFTWARE "could not extract exactly one required primary-key fingerprint"
 
-    say "Signature verified with expected key: $expected"
-  )
+  if [ "$actual" != "$expected" ]; then
+    { printf 'Key fingerprint mismatch!\n' \
+    ; printf 'Expected: %s\n' "$expected" \
+    ; printf 'Actual:   %s\n' "$actual" \
+    ; \
+    } | panic $EX_SOFTWARE
+  fi
 
+  # Cryptographically verify the signature, we trust it because we do
+  # our own explicit fingerprint validation and have obtained both
+  # fingerprint and public key by hand.
+  # Keeping the machine-readable status for the next check.
+  if ! gpg --homedir "$tmpdir" --batch --no-tty \
+    --trust-model always --assert-signer "$expected" --quiet \
+    --status-fd 1 --verify "$sig" "$bin" \
+    > "$tmpdir/status"
+  then
+    panic $EX_SOFTWARE "Signature verification failed!"
+  fi
+
+  # Verify the signer's primary-key fingerprint.
+  # Require exactly one valid signature from our expected key.
+  if ! awk -v expected="$expected" '
+    $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+      count++
+      # Last field is the primary-key fingerprint.
+      # Fall back to signing-key fingerprint if absent.
+      primary = (NF >= 12 ? $12 : $3)
+      if (primary != expected)
+        mismatch = 1
+    }
+    END {
+      if (count != 1 || mismatch)
+        exit 1
+    }
+    ' "$tmpdir/status"
+  then
+    panic $EX_SOFTWARE "Signature signer mismatch!"
+  fi
+
+  info "Signature verified with expected key: $expected"
+}
 
 write_alpine_key() {
   [ -f "$IMAGES/alpine-key.asc" ] && return 0
@@ -1071,30 +1454,37 @@ ALPINE_KEY
 }
 
 fetch_image() {
-  need curl; need gpg; need qemu-img qemu
-  ensure_dirs; write_alpine_key
+  require curl
+  require gpg gnupg
+  require qemu-img qemu
+
+  ensure_dirs
+  write_alpine_key
+
   BASE=$IMAGES/$(image_name)
   URL=$(image_url)
   if [ ! -f "$BASE" ]; then
-    say "Downloading signed Alpine image: $URL"
-    curl --fail --location --proto '=https' --tlsv1.2 --output "$BASE.part" "$URL" || die 'Alpine image download failed'
+    info "Downloading signed Alpine image: $URL"
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$BASE.part" "$URL" || panic $EX_IOERR 'Alpine image download failed'
     mv -f "$BASE.part" "$BASE"
   fi
   if [ ! -f "$BASE.asc" ]; then
-    curl --fail --location --proto '=https' --tlsv1.2 --output "$BASE.asc.part" "$URL.asc" || die 'Alpine signature download failed'
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$BASE.asc.part" "$URL.asc" || panic $EX_IOERR 'Alpine signature download failed'
     mv -f "$BASE.asc.part" "$BASE.asc"
   fi
   verify_gpg_signature "$ALPINE_FPR" "$IMAGES/alpine-key.asc" "$BASE.asc" "$BASE"
 }
+
 fetch_firmware() {
   FIRMWARE=$IMAGES/$FIRMWARE_VERSION-QEMU_EFI.fd
   if [ ! -f "$FIRMWARE" ] || ! printf '%s  %s\n' "$FIRMWARE_SHA256" "$FIRMWARE" | shasum -a 256 -c >/dev/null 2>&1; then
-    need curl
-    curl --fail --location --proto '=https' --tlsv1.2 --output "$FIRMWARE.part" "$FIRMWARE_URL" || die 'Firmware download failed'
-    printf '%s  %s\n' "$FIRMWARE_SHA256" "$FIRMWARE.part" | shasum -a 256 -c >/dev/null 2>&1 || die 'Firmware digest mismatch'
+    require curl
+    curl --fail --location --proto '=https' --tlsv1.2 --output "$FIRMWARE.part" "$FIRMWARE_URL" || panic $EX_IOERR 'Firmware download failed'
+    printf '%s  %s\n' "$FIRMWARE_SHA256" "$FIRMWARE.part" | shasum -a 256 -c >/dev/null 2>&1 || panic $EX_CONFIG 'Firmware digest mismatch'
     mv -f "$FIRMWARE.part" "$FIRMWARE"
   fi
 }
+
 # One implementation for both modes. All egress is DENIED by QEMU unless
 # explicitly forwarded. The guest sees only its internal QEMU user network.
 net_args() {
@@ -1102,15 +1492,22 @@ net_args() {
   NET="user,id=net0,restrict=on,ipv6=off,net=10.0.2.0/24,dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22"
   NET="$NET,guestfwd=tcp:10.0.2.100:11434-cmd:socat STDIO TCP:127.0.0.1:11434"
   case $profile in
-    unsafe) NET="$NET,guestfwd=tcp:10.0.2.100:3128-cmd:socat STDIO TCP:127.0.0.1:$SQUID_PORT";;
-    models) NET="$NET,guestfwd=tcp:10.0.2.100:3128-cmd:socat STDIO TCP:127.0.0.1:$SQUID_MODELS_PORT";;
-    offline) :;;
-    *) die "Unknown network policy: $profile";;
+    unsafe) NET="$NET,guestfwd=tcp:10.0.2.100:3128-cmd:socat STDIO TCP:127.0.0.1:$SQUID_PORT" ;;
+    models) NET="$NET,guestfwd=tcp:10.0.2.100:3128-cmd:socat STDIO TCP:127.0.0.1:$SQUID_MODELS_PORT" ;;
+    offline) : ;;
+    *) panic $EX_SOFTWARE "Unknown network policy: $profile" ;;
   esac
   printf '%s\n' "$NET"
 }
-qemu_vm() { # never exec; caller supervises it and holds a disk lock
-  disk=$1 seed=$2 mac=$3 mode=$4 serial_mode=${5:-log}
+
+# never exec; caller supervises it and holds a disk lock
+qemu_vm() {
+  disk=$1
+  seed=$2
+  mac=$3
+  mode=$4
+  serial_mode=${5:-log}
+
   net=$(net_args "$mode")
   set -- qemu-system-aarch64 \
     -machine virt-11.0 -cpu host -accel hvf \
@@ -1124,21 +1521,26 @@ qemu_vm() { # never exec; caller supervises it and holds a disk lock
     -device scsi-hd,drive=osdisk,bus=scsi_os.0,channel=0,scsi-id=0,lun=0,bootindex=1 \
     -blockdev "driver=vvfat,node-name=cidata,dir=$seed,label=CIDATA,read-only=on" \
     -device scsi-hd,drive=cidata,bus=scsi_os.0,channel=0,scsi-id=1,lun=0 \
-    -fsdev "local,id=shared,path=$SHARED,security_model=mapped-xattr,readonly=on" \
-    -device virtio-9p-pci,fsdev=shared,mount_tag=shared \
     -netdev "$net" \
     -device "virtio-net-pci,netdev=net0,mac=$mac" \
     -chardev "socket,path=$TMP/$NAME.qga.sock,server=on,wait=off,id=qga0" \
     -device virtio-serial-pci \
     -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
     -device qemu-xhci -device usb-kbd -device usb-tablet \
-    -k en-us -device virtio-gpu-pci
+    -k en-us
+  if [ "$DISPLAY_ENABLED" = 1 ]; then
+    set -- "$@" -device virtio-gpu-pci
+  fi
+  if [ "$SHARE_ENABLED" = 1 ]; then
+    set -- "$@" -fsdev "local,id=shared,path=$SHARED,security_model=mapped-xattr,readonly=on" \
+      -device virtio-9p-pci,fsdev=shared,mount_tag=shared
+  fi
   # QEMU logs guest UART bytes directly: no cloud-init, SSH, or extra tool needed.
   # In debug mode, stdio is interactive *and* copied to the same log file.
   case $serial_mode in
-    log) set -- "$@" -chardev "file,id=fbserial,path=$SERIAL_LOG" -serial chardev:fbserial;;
-    interactive) set -- "$@" -chardev "stdio,id=fbserial,signal=on,logfile=$SERIAL_LOG,logappend=on" -serial chardev:fbserial;;
-    *) die "Unknown serial mode: $serial_mode";;
+    log) set -- "$@" -chardev "file,id=fbserial,path=$SERIAL_LOG" -serial chardev:fbserial ;;
+    interactive) set -- "$@" -chardev "stdio,id=fbserial,signal=on,logfile=$SERIAL_LOG,logappend=on" -serial chardev:fbserial ;;
+    *) panic $EX_SOFTWARE "Unknown serial mode: $serial_mode" ;;
   esac
   exec "$@"
 }
@@ -1149,26 +1551,27 @@ ssh_vm() {
     -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=4 \
     127.0.0.1 "$@"
 }
+
 wait_ssh() {
   attempts=0
   SSH_WAIT_LOG=$TMP/$NAME.ssh-wait.log
-  say 'Waiting for SSH (max 4 minutes; boot serial and SSH errors are logged)...'
+  info 'Waiting for SSH (max 4 minutes; boot serial and SSH errors are logged)...'
   while [ "$attempts" -lt 120 ]; do
     if ssh_vm 'true' </dev/null >/dev/null 2> "$SSH_WAIT_LOG"; then
-      say 'SSH is ready.'
+      info 'SSH is ready.'
       return 0
     fi
-    if ! kill -0 "$VM_PID" 2>/dev/null; then boot_diagnostics; die 'QEMU exited before SSH was ready'; fi
+    if ! kill -0 "$VM_PID" 2>/dev/null; then boot_diagnostics; panic $EX_SOFTWARE 'QEMU exited before SSH was ready'; fi
     attempts=$((attempts + 1))
     if [ $((attempts % 10)) -eq 0 ]; then
-      say "SSH still unavailable after $((attempts * 2))s; last SSH error:"
+      info "SSH still unavailable after $((attempts * 2))s; last SSH error:"
       tail -n 2 "$SSH_WAIT_LOG" >&2 || :
     fi
     sleep 2
   done
   boot_diagnostics
   tail -n 10 "$SSH_WAIT_LOG" >&2 || :
-  die "Timed out waiting for guest SSH; inspect $SSH_WAIT_LOG, or run '$0 $NAME debug'"
+  panic $EX_NOINPUT "Timed out waiting for guest SSH; inspect $SSH_WAIT_LOG, or run '$0 $NAME debug'"
 }
 
 # Cloud-init's *historical* error state is not the same as guest readiness:
@@ -1178,31 +1581,31 @@ wait_ssh() {
 wait_cloud() {
   CLOUD_STATE=unknown
   attempts=0
-  say 'Waiting for cloud-init to reach a terminal state (max 8 minutes)...'
+  info 'Waiting for cloud-init to reach a terminal state (max 8 minutes)...'
   while [ "$attempts" -lt 240 ]; do
     result=$(ssh_vm 'cloud-init status 2>&1 || true' </dev/null 2>/dev/null) || result='SSH unavailable'
     case $result in
-      *'status: done'*) CLOUD_STATE="done"; say 'Cloud-init completed.'; return 0;;
+      *'status: done'*) CLOUD_STATE="done"; info 'Cloud-init completed.'; return 0 ;;
       *'status: error'*|*'status: degraded'*)
         CLOUD_STATE=error
         CLOUD_LOG=$TMP/$NAME.cloud-init-status.log
         ssh_vm 'cloud-init status --long 2>&1 || :; tail -n 70 /var/log/cloud-init-output.log 2>/dev/null || :' \
           </dev/null > "$CLOUD_LOG" 2>&1 || :
-        say "WARNING: cloud-init reported a prior failure; details: $CLOUD_LOG"
-        say 'Firebreak will verify the installed components and reconcile if safe.'
+        warn "cloud-init reported a prior failure; details: $CLOUD_LOG"
+        info 'Firebreak will verify the installed components and reconcile if safe.'
         tail -n 15 "$CLOUD_LOG" >&2 || :
         return 0;;
-      *'status: disabled'*) boot_diagnostics; die 'Cloud-init is disabled in the guest';;
+      *'status: disabled'*) boot_diagnostics; panic $EX_SOFTWARE 'Cloud-init is disabled in the guest' ;;
     esac
-    if ! kill -0 "$VM_PID" 2>/dev/null; then boot_diagnostics; die 'QEMU stopped before cloud-init completed'; fi
+    if ! kill -0 "$VM_PID" 2>/dev/null; then boot_diagnostics; panic $EX_SOFTWARE 'QEMU stopped before cloud-init completed'; fi
     attempts=$((attempts + 1))
     if [ $((attempts % 10)) -eq 0 ]; then
-      say "Cloud-init still running after $((attempts * 2))s: $result"
+      info "Cloud-init still running after $((attempts * 2))s: $result"
     fi
     sleep 2
   done
   boot_diagnostics
-  die "Timed out waiting for cloud-init (last response: $result); run '$0 $NAME debug'"
+  panic $EX_UNAVAILABLE "Timed out waiting for cloud-init (last response: $result); run '$0 $NAME debug'"
 }
 
 SQUID_PID=
@@ -1212,9 +1615,9 @@ start_squid() {
   # Keep parser errors: Squid can fail even when the generated syntax is valid
   # (permissions, missing paths, incompatible Squid major version, etc.).
   if ! ( cd "$PROXY" && "$SQUID_BIN" -k parse -f "$PROXY/squid.conf" ) > "$PROXY/parse.log" 2>&1; then
-    say "Squid policy validation failed ($SQUID_BIN):"
+    warn "Squid policy validation failed ($SQUID_BIN):"
     tail -n 30 "$PROXY/parse.log" >&2 || :
-    die "Inspect $PROXY/parse.log"
+    panic $EX_CONFIG "Inspect $PROXY/parse.log"
   fi
   ( cd "$PROXY" && exec "$SQUID_BIN" -N -f "$PROXY/squid.conf" ) > "$PROXY/foreground.log" 2>&1 &
   SQUID_PID=$!
@@ -1223,29 +1626,31 @@ start_squid() {
     # Reap the process and show the actual reason instead of a generic error.
     wait "$SQUID_PID" 2>/dev/null || :
     SQUID_PID=
-    say "Squid startup failed ($SQUID_BIN):"
+    warn "Squid startup failed ($SQUID_BIN):"
     tail -n 30 "$PROXY/foreground.log" >&2 || :
-    die "Inspect $PROXY/foreground.log"
+    panic $EX_UNAVAILABLE "Inspect $PROXY/foreground.log"
   fi
 }
+
 VM_PID=
 TUNNEL_PID=
 VM_LOCK=
 SERIAL_LOG=
 VM_LOG=
 boot_diagnostics() {
-  say "Serial console log: $SERIAL_LOG"
-  say "QEMU diagnostics: $VM_LOG"
+  info "Serial console log: $SERIAL_LOG"
+  info "QEMU diagnostics: $VM_LOG"
   if [ -f "$SERIAL_LOG" ]; then
-    say '--- Last 50 lines of guest serial output ---'
+    info '--- Last 50 lines of guest serial output ---'
     tail -n 50 "$SERIAL_LOG" >&2 || :
   fi
   if [ -s "$VM_LOG" ]; then
-    say '--- QEMU stdout/stderr ---'
+    info '--- QEMU stdout/stderr ---'
     tail -n 25 "$VM_LOG" >&2 || :
   fi
-  say "Recovery: '$0 $NAME debug' (no SSH needed), '$0 $NAME logs'"
+  info "Recovery: '$CLI_NAME $NAME debug', '$CLI_NAME $NAME logs'"
 }
+
 cleanup_vm() {
   exit_code=$?
   trap - EXIT HUP INT TERM
@@ -1257,7 +1662,7 @@ cleanup_vm() {
     waiting=0
     while kill -0 "$VM_PID" 2>/dev/null && [ "$waiting" -lt 30 ]; do sleep 1; waiting=$((waiting+1)); done
     if kill -0 "$VM_PID" 2>/dev/null; then
-      say 'Warning: QEMU did not shut down normally; attempting SIGTERM'
+      warn 'Warning: QEMU did not shut down normally; attempting SIGTERM'
       kill "$VM_PID" 2>/dev/null || :
       sleep 3
       if kill -0 "$VM_PID" 2>/dev/null; then kill -KILL "$VM_PID" 2>/dev/null || :; fi
@@ -1269,19 +1674,26 @@ cleanup_vm() {
   rm -f "$VM_SOCKET" "$ACTIVE_MODE"
   exit "$exit_code"
 }
+
 lock_disk() {
   VM_LOCK=$DISK.lock
-  mkdir "$VM_LOCK" 2>/dev/null || die "Sandbox disk locked: $VM_LOCK (clear a stale lock only after verifying the VM is off)"
+  mkdir "$VM_LOCK" 2>/dev/null || panic $EX_SOFTWARE "Sandbox disk locked: $VM_LOCK (clear a stale lock only after verifying the VM is off)"
 }
+
 start_vm() {
-  profile=$1 serial_mode=${2:-log}
-  case $serial_mode in log|interactive) :;; *) die 'Invalid serial mode';; esac
+  profile=$1
+  serial_mode=${2:-log}
+
+  case $serial_mode in
+    log|interactive) : ;;
+    *) panic $EX_SOFTWARE 'Invalid serial mode' ;;
+  esac
   if [ "$serial_mode" = interactive ] && [ ! -t 0 ]; then
-    die 'Debug console needs a real terminal (stdin must be a TTY)'
+    panic $EX_OSERR 'Debug console needs a real terminal (stdin must be a TTY)'
   fi
-  [ -f "$DISK" ] || die "No sandbox named $NAME; run '$0 $NAME create'"
+  [ -f "$DISK" ] || panic $EX_DATAERR "No sandbox named $NAME; run '$CLI_NAME $NAME new'"
   require_host
-  [ ! -d "$DISK.lock" ] || die 'Sandbox is already running'
+  [ ! -d "$DISK.lock" ] || panic $EX_USAGE 'Sandbox is already running'
   render_seed "$NAME"
   fetch_firmware
   lock_disk
@@ -1290,24 +1702,27 @@ start_vm() {
   trap 'exit 129' HUP
   trap cleanup_vm EXIT
   # The launch profile is the authority for the host-side Docker client policy.
-  # shell_env reads it only while the forwarded Podman socket exists.
+  # cmd_shell_env reads it only while the forwarded Podman socket exists.
   printf '%s\n' "$profile" | write_if_changed "$ACTIVE_MODE"
-  case $profile in unsafe|models) start_squid;; esac
+  case $profile in
+    unsafe|models) start_squid ;;
+  esac
   SERIAL_LOG=$TMP/$NAME.serial.log
   VM_LOG=$TMP/$NAME.qemu.log
   # Log every boot from the start, even if cloud-init/sshd never run.
   : > "$SERIAL_LOG"; : > "$VM_LOG"
   chmod 600 "$SERIAL_LOG" "$VM_LOG"
-  if [ "$serial_mode" = interactive ]; then
+  if [ "$serial_mode" = "interactive" ]; then
     qemu_vm "$DISK" "$SEED" "$MAC" "$profile" interactive < /dev/tty 2>> "$VM_LOG" &
   else
     qemu_vm "$DISK" "$SEED" "$MAC" "$profile" log >> "$VM_LOG" 2>&1 &
   fi
   VM_PID=$!
-  say "Starting $NAME ($profile, guest MAC $MAC)..."
-  say "Serial log: $SERIAL_LOG"
-  [ "$serial_mode" = interactive ] || wait_ssh
+  info "Starting $NAME ($profile, guest MAC $MAC)..."
+  info "Serial log: $SERIAL_LOG"
+  [ "$serial_mode" = "interactive" ] || wait_ssh
 }
+
 # Test the actual guest capabilities, rather than trusting cloud-init's cached
 # final status or whether one installer happened to return successfully.
 check_guest_packages() {
@@ -1318,31 +1733,34 @@ for cmd in curl git podman forgejo rc-service; do
 done
 EOF_CHECK_PACKAGES
 }
+
 check_gvisor() {
   ssh_vm 'test -x /usr/local/bin/runsc && test -d /usr/local/bin/gvisor-bin' </dev/null >/dev/null 2>&1
 }
+
 install_gvisor_if_missing() {
   if check_gvisor; then
-    say 'gVisor already installed; keeping existing binaries.'
+    info 'gVisor already installed; keeping existing binaries.'
     return 0
   fi
-  [ -f "$SEED/gvisor-install.sh" ] || die 'Generated gVisor installer missing; run config update'
+  [ -f "$SEED/gvisor-install.sh" ] || panic $EX_UNAVAILABLE 'Generated gVisor installer missing; run config update'
   GVISOR_LOG=$TMP/$NAME.gvisor-repair.log
-  say 'gVisor incomplete; resuming its bootstrap through restricted setup proxy...'
+  info 'gVisor incomplete; resuming its bootstrap through restricted setup proxy...'
   if ssh_vm '/bin/sh -s' < "$SEED/gvisor-install.sh" > "$GVISOR_LOG" 2>&1; then
-    say 'gVisor bootstrap completed.'
+    info 'gVisor bootstrap completed.'
   else
-    say 'gVisor bootstrap failed; relevant output:'
+    warn 'gVisor bootstrap failed; relevant output:'
     tail -n 45 "$GVISOR_LOG" >&2 || :
-    say "Inspect $GVISOR_LOG and $PROXY/access.log"
+    warn "Inspect $GVISOR_LOG and $PROXY/access.log"
     return 1
   fi
-  check_gvisor || { say 'gVisor bootstrap returned success but runsc installation is incomplete'; return 1; }
+  check_gvisor || { warn 'gVisor bootstrap returned success but runsc installation is incomplete'; return 1; }
 }
+
 apply_podman_mode() {
   case $CURRENT_PROFILE in
     unsafe|models|offline) ;;
-    *) die "Unknown Podman profile: $CURRENT_PROFILE" ;;
+    *) panic $EX_SOFTWARE "Unknown Podman profile: $CURRENT_PROFILE" ;;
   esac
 
   ssh_vm "sh -s -- '$CURRENT_PROFILE'" <<'GUEST'
@@ -1362,17 +1780,17 @@ case $mode in
     pull=missing
     engine_proxy=yes
     container_proxy=yes
-    ;;
+  ;;
   models)
     pull=never
     engine_proxy=no
     container_proxy=yes
-    ;;
+  ;;
   offline)
     pull=never
     engine_proxy=no
     container_proxy=no
-    ;;
+  ;;
 esac
 
 {
@@ -1413,31 +1831,35 @@ fi
 printf '%s\n' "$wanted" > "$marker"
 GUEST
 }
+
 apply_guest() {
   # Keep stdout/stderr on the host: otherwise remote reconciliation failures
   # are indistinguishable from an SSH disconnect (and set -e hides context).
   APPLY_LOG=$TMP/$NAME.apply.log
   selected_runtime=$(runtime_for_profile "$CURRENT_PROFILE")
-  say "Applying Firebreak guest policy (profile=$CURRENT_PROFILE, OCI runtime=$selected_runtime; log: $APPLY_LOG)..."
+  info "Applying Firebreak guest policy (profile=$CURRENT_PROFILE, OCI runtime=$selected_runtime; log: $APPLY_LOG)..."
   if ssh_vm "/bin/sh -s -- '$CURRENT_PROFILE' '$selected_runtime'" < "$SEED/reconcile.sh" > "$APPLY_LOG" 2>&1; then
-    say 'Guest policy script completed.'
+    info 'Guest policy script completed.'
   else
-    say 'Guest policy script failed; last 60 lines follow:'
+    warn 'Guest policy script failed; last 60 lines follow:'
     tail -n 60 "$APPLY_LOG" >&2 || :
-    die "Guest reconciliation failed; see $APPLY_LOG (disk preserved)"
+    panic $EX_SOFTWARE "Guest reconciliation failed; see $APPLY_LOG (disk preserved)"
   fi
   # Interactive guest login shells inherit the proxy through /etc/profile.d.
   # The active listener in both guest-forwarded modes is 10.0.2.100:3128.
   case $CURRENT_PROFILE in
     unsafe|models)
       ssh_vm "printf '%s\\n' 'export HTTP_PROXY=http://10.0.2.100:3128' 'export HTTPS_PROXY=\$HTTP_PROXY' 'export http_proxy=\$HTTP_PROXY' 'export https_proxy=\$HTTP_PROXY' > /etc/profile.d/firebreak-proxy.sh" || \
-        die 'Guest proxy profile installation failed';;
+        panic $EX_PROTOCOL 'Guest proxy profile installation failed'
+    ;;
     offline)
-      ssh_vm 'rm -f /etc/profile.d/firebreak-proxy.sh' || die 'Could not clear guest proxy profile';;
-    *) die "Unexpected profile in apply_guest: $CURRENT_PROFILE";;
+      ssh_vm 'rm -f /etc/profile.d/firebreak-proxy.sh' || panic $EX_PROTOCOL 'Could not clear guest proxy profile'
+    ;;
+    *) panic $EX_SOFTWARE "Unexpected profile in apply_guest: $CURRENT_PROFILE" ;;
   esac
-  apply_podman_mode || die 'Could not apply Podman network policy'
+  apply_podman_mode || panic $EX_PROTOCOL 'Could not apply Podman network policy'
 }
+
 verify_guest() {
   # These are the minimum capabilities needed for a usable Firebreak VM.
   # Incomplete cloud-init must not be masked by touching 'provisioned'.
@@ -1455,47 +1877,53 @@ rc-service forgejo status || { echo 'Forgejo service not running' >&2; exit 1; }
 EOF_VERIFY
   then
     case $CURRENT_PROFILE in
-      unsafe|models) ssh_vm 'test -s /etc/profile.d/firebreak-proxy.sh' </dev/null >> "$VERIFY_LOG" 2>&1 || { say 'Guest proxy profile missing'; return 1; };;
-      offline) :;;
+      unsafe|models) ssh_vm 'test -s /etc/profile.d/firebreak-proxy.sh' </dev/null >> "$VERIFY_LOG" 2>&1 || { info 'Guest proxy profile missing'; return 1; } ;;
+      offline) : ;;
     esac
     return 0
   fi
-  say 'Guest readiness verification failed:'
+  info 'Guest readiness verification failed:'
   tail -n 40 "$VERIFY_LOG" >&2 || :
   return 1
 }
+
 finish_provisioning() {
   # An existing disk may have a historical cloud-init error from a now-fixed
   # bootstrap. Wait for it to *stop running*, then verify and reconcile.
   wait_cloud
   if ! check_guest_packages; then
-    die "Guest packages are incomplete; use '$0 $NAME unsafe' to inspect /var/log/cloud-init-output.log"
+    panic $EX_UNAVAILABLE "Guest packages are incomplete; use '$CLI_NAME $NAME unsafe' to inspect /var/log/cloud-init-output.log"
   fi
-  install_gvisor_if_missing || die 'gVisor is not ready; VM disk preserved'
+  install_gvisor_if_missing || panic $EX_TEMPFAIL 'gVisor is not ready; VM disk preserved'
   apply_guest
-  verify_guest || die "Guest policy applied but services are not ready; inspect $TMP/$NAME.verify.log"
+  verify_guest || panic $EX_TEMPFAIL "Guest policy applied but services are not ready; inspect $TMP/$NAME.verify.log"
   touch "$SECRET/provisioned"
-  if [ "$CLOUD_STATE" = error ]; then
-    say "Provisioned $NAME after verification; historical cloud-init error retained in $TMP/$NAME.cloud-init-status.log."
+  if [ "$CLOUD_STATE" = "error" ]; then
+    info "Provisioned $NAME after verification; historical cloud-init error retained in $TMP/$NAME.cloud-init-status.log."
   else
-    say "Provisioned $NAME; guest components and services verified."
+    info "Provisioned $NAME; guest components and services verified."
   fi
 }
 
-create_vm() {
+cmd_vm_new() {
   mode=$STORAGE
   boot=yes
   for opt do
     case $opt in
-      --storage=*) mode=${opt#*=};;
-      --no-boot) boot=no;;
-      *) die "Unknown create option: $opt";;
+      --storage=*) mode=${opt#*=} ;;
+      --no-boot) boot=no ;;
+      *) panic $EX_USAGE "Unknown create option: $opt" ;;
     esac
   done
-  case $mode in ephemeral|persistent) :;; *) die 'Choose --storage=ephemeral|persistent';; esac
+  case $mode in
+    ephemeral|persistent) : ;;
+    *) panic $EX_USAGE 'Choose --storage=ephemeral|persistent' ;;
+  esac
   require_host
-  vm_paths "$NAME"
-  if [ -f "$DISK" ]; then die "Disk already exists: $DISK (use $0 $NAME provision to resume; never overwritten)"; fi
+  configure_vm_paths "$NAME"
+  if [ -f "$DISK" ]; then
+    panic $EX_USAGE "Disk already exists: $DISK (use $0 $NAME provision to resume; never overwritten)"
+  fi
   ensure_dirs
   ensure_keys
   printf '%s\n' "$mode" > "$SECRET/storage"
@@ -1505,94 +1933,99 @@ create_vm() {
   # No partial final disk: create, resize, and snapshot a temporary QCOW2.
   part=$DISK.creating.$$
   trap 'rm -f "$part"' EXIT HUP INT TERM
-  qemu-img convert -O qcow2 "$BASE" "$part" || die 'Could not create QCOW2'
-  qemu-img resize "$part" "$VM_SIZE" || die 'Could not resize QCOW2'
-  qemu-img snapshot -c base "$part" || die 'Could not snapshot initial disk'
+  qemu-img convert -O qcow2 "$BASE" "$part" || panic $EX_CANTCREAT 'Could not create QCOW2'
+  qemu-img resize "$part" "$VM_SIZE" || panic $EX_CANTCREAT 'Could not resize QCOW2'
+  qemu-img snapshot -c base "$part" || panic $EX_CANTCREAT 'Could not snapshot initial disk'
   mv "$part" "$DISK"
   trap - EXIT HUP INT TERM
-  say "Created $NAME, storage=$mode ($DISK)"
+  info "Created $NAME, storage=$mode ($DISK)"
   if [ "$boot" = yes ]; then
     CURRENT_PROFILE=unsafe
     start_vm unsafe
     finish_provisioning
-    say 'Initial provisioning complete; shutting down VM.'
+    info 'Initial provisioning complete; shutting down VM.'
     # EXIT trap requests a graceful shutdown.
   else
-    say 'Disk created but not provisioned. Its first boot still runs cloud-init.'
+    info 'Disk created but not provisioned. Its first boot still runs cloud-init.'
   fi
 }
 
-console_password() {
-  [ -f "$SECRET/console-password" ] || die 'Console password not generated; rerun config update or create'
-  say "Console user: alpine (VM video or serial console only; not SSH)"
+cmd_console_password() {
+  [ -f "$SECRET/console-password" ] || panic $EX_USAGE 'Console password not generated; rerun config update or create'
+  info "Console user: $GUEST_USER (VM video or serial console only; not SSH)"
   cat "$SECRET/console-password"
   printf '\n'
 }
-show_logs() {
+
+cmd_logs() {
   logfile=$TMP/$NAME.serial.log
   case ${1:-} in
-    '') [ "$#" -eq 0 ] || die 'logs accepts only --follow'; [ -f "$logfile" ] || die "No boot log yet: $logfile"; cat "$logfile";;
-    --follow) [ "$#" -eq 1 ] || die 'logs accepts only --follow'; [ -f "$logfile" ] || die "No boot log yet: $logfile"; exec tail -f "$logfile";;
-    *) die 'Usage: firebreak NAME logs [--follow]';;
+    '') [ "$#" -eq 0 ] || panic $EX_USAGE 'logs accepts only --follow'; [ -f "$logfile" ] || panic $EX_TEMPFAIL "No boot log yet: $logfile"; cat "$logfile" ;;
+    --follow) [ "$#" -eq 1 ] || panic $EX_USAGE 'logs accepts only --follow'; [ -f "$logfile" ] || panic $EX_TEMPFAIL "No boot log yet: $logfile"; exec tail -f "$logfile" ;;
+    *) print_usage ;;
   esac
 }
-debug_vm() {
+
+cmd_vm_debug() {
   # No SSH readiness, no cloud-init wait, no provisioning/reconciliation.
   # Restrict all guest egress through the same Squid-filtered unsafe profile.
   CURRENT_PROFILE=unsafe
   start_vm unsafe interactive
-  config_cmd proxy-check --online
-  say '--- Firebreak guest recovery console ---'
-  say "Host serial log: $SERIAL_LOG"
-  say "Host QEMU log: $VM_LOG"
-  say "Login on video/serial terminal: alpine; password via '$0 $NAME console-password' in another terminal."
-  say 'If cloud-init failed before creating the user, the password may NOT be active.'
-  say "SSH recovery (inside Alpine, using doas): mkdir -p /mnt/fbseed; mount -t vfat /dev/sdb1 /mnt/fbseed; sh /mnt/fbseed/ssh-recovery.sh"
-  say 'Debug mode stays running without SSH. Quit QEMU or interrupt Firebreak to stop.'
+  cmd_config proxy-check --online
+  info '--- Firebreak guest recovery console ---'
+  info "Host serial log: $SERIAL_LOG"
+  info "Host QEMU log: $VM_LOG"
+  info "Login on video/serial terminal: $GUEST_USER; password via '$CLI_NAME $NAME console-password' in another terminal."
+  info 'If cloud-init failed before creating the user, the password may NOT be active.'
+  info "SSH recovery (inside Alpine, using doas): mkdir -p /mnt/fbseed; mount -t vfat /dev/sdb1 /mnt/fbseed; sh /mnt/fbseed/ssh-recovery.sh"
+  info 'Debug mode stays running without SSH. Quit QEMU or interrupt Firebreak to stop.'
   status=0
   wait "$VM_PID" || status=$?
   VM_PID=
-  [ "$status" -eq 0 ] || die "QEMU exited with status $status; inspect $VM_LOG"
+  [ "$status" -eq 0 ] || panic $EX_SOFTWARE "QEMU exited with status $status; inspect $VM_LOG"
 }
 
-provision_vm() {
-  [ -f "$DISK" ] || die "No existing VM disk; run '$0 $NAME create'"
+cmd_vm_provision() {
+  [ -f "$DISK" ] || panic $EX_USAGE "No existing VM disk; run '$CLI_NAME $NAME create'"
   CURRENT_PROFILE=unsafe
   start_vm unsafe
   finish_provisioning
-  say "VM will shut down cleanly; then run '$0 $NAME up'."
+  info "VM will shut down cleanly; then run '$CLI_NAME $NAME up'."
 }
+
 # Previous `repair` now acts as an alias for general resumable provisioning:
 # reinstalling gVisor on every invocation would be unnecessary and brittle.
 repair_vm() { provision_vm; }
 
-unsafe_qemu_vm() {
+cmd_vm_unsafe_qemu() {
   CURRENT_PROFILE=unsafe
   start_vm unsafe
   if [ ! -f "$SECRET/provisioned" ]; then
-    say "Warning: not provisioned. Maintenance only; run '$0 $NAME provision' to finish setup."
+    warn "Warning: not provisioned. Maintenance only; run '$CLI_NAME $NAME provision' to finish setup."
   else
     apply_guest
   fi
   # Unsafe is deliberately manual. Never replay installers or mark an
   # unprovisioned VM ready just because a shell session was opened/closed.
-  say 'Maintenance shell: network access is restricted to Squid setup allowlist.'
+  info 'Maintenance shell: network access is restricted to Squid setup allowlist.'
   status=0
   ssh -t -p "$SSH_PORT" -l root -i "$CLIENT" \
     -o "UserKnownHostsFile=$KNOWN" -o StrictHostKeyChecking=yes \
     -o IdentitiesOnly=yes 127.0.0.1 || status=$?
   if [ ! -f "$SECRET/provisioned" ]; then
-    say "Still unprovisioned; run '$0 $NAME provision' when ready to finish setup."
+    info "Still unprovisioned; run '$CLI_NAME $NAME provision' when ready to finish setup."
   fi
   return "$status"
 }
 
-up_vm() {
-  [ -f "$SECRET/provisioned" ] || die 'Not provisioned: run create (or unsafe for first boot)'
-  case $NETWORK_WORK in offline|models) CURRENT_PROFILE=$NETWORK_WORK;; esac
+cmd_vm_up() {
+  [ -f "$SECRET/provisioned" ] || panic $EX_USAGE 'Not provisioned: run new (or unsafe for first boot)'
+  case $NETWORK_WORK in
+    offline|models) CURRENT_PROFILE=$NETWORK_WORK ;;
+  esac
   start_vm "$CURRENT_PROFILE"
   apply_guest
-  verify_guest || die "Sandbox guest services are unhealthy; inspect $TMP/$NAME.verify.log"
+  verify_guest || panic $EX_UNAVAILABLE "Sandbox guest services are unhealthy; inspect $TMP/$NAME.verify.log"
   rm -f "$VM_SOCKET"
   ssh -N -p "$SSH_PORT" -l root -i "$CLIENT" \
     -o "UserKnownHostsFile=$KNOWN" -o StrictHostKeyChecking=yes \
@@ -1603,21 +2036,23 @@ up_vm() {
     127.0.0.1 &
   TUNNEL_PID=$!
   sleep 1
-  kill -0 "$TUNNEL_PID" 2>/dev/null || die 'SSH forwarding failed'
-  say "Sandbox $NAME ready. Use '$0 $NAME sh', Forgejo at http://127.0.0.1:$FORGEJO_PORT"
+  kill -0 "$TUNNEL_PID" 2>/dev/null || panic $EX_PROTOCOL 'SSH forwarding failed'
+  info "Sandbox $NAME ready. Use '$0 $NAME sh', Forgejo at http://127.0.0.1:$FORGEJO_PORT"
   wait "$TUNNEL_PID"
 }
 
-unsafe_vm() {
-  [ -f "$SECRET/provisioned" ] || die 'Not provisioned: run create (or unsafe for first boot)'
-  # case $NETWORK_WORK in offline|models) CURRENT_PROFILE=$NETWORK_WORK;; esac
+cmd_vm_unsafe() {
+  [ -f "$SECRET/provisioned" ] || panic $EX_USAGE 'Not provisioned: run new (or unsafe for first boot)'
+  case $NETWORK_WORK in
+    offline|models) CURRENT_PROFILE=$NETWORK_WORK ;;
+  esac
   CURRENT_PROFILE=unsafe
   start_vm "$CURRENT_PROFILE"
   apply_guest
-  verify_guest || die "Sandbox guest services are unhealthy; inspect $TMP/$NAME.verify.log"
+  verify_guest || panic $EX_UNAVAILABLE "Sandbox guest services are unhealthy; inspect $TMP/$NAME.verify.log"
   # Unsafe is deliberately manual. Never replay installers or mark an
   # unprovisioned VM ready just because a shell session was opened/closed.
-  say 'Maintenance shell: network access is restricted to Squid setup allowlist.'
+  info 'Maintenance shell: network access is restricted to Squid setup allowlist.'
   rm -f "$VM_SOCKET"
   ssh -N -p "$SSH_PORT" -l root -i "$CLIENT" \
     -o "UserKnownHostsFile=$KNOWN" -o StrictHostKeyChecking=yes \
@@ -1628,8 +2063,8 @@ unsafe_vm() {
     127.0.0.1 &
   TUNNEL_PID=$!
   sleep 1
-  kill -0 "$TUNNEL_PID" 2>/dev/null || die 'SSH forwarding failed'
-  say "Sandbox $NAME ready. Use '$0 $NAME sh', Forgejo at http://127.0.0.1:$FORGEJO_PORT"
+  kill -0 "$TUNNEL_PID" 2>/dev/null || panic $EX_PROTOCOL 'SSH forwarding failed'
+  info "Sandbox $NAME ready. Use '$0 $NAME sh', Forgejo at http://127.0.0.1:$FORGEJO_PORT"
   wait "$TUNNEL_PID"
 }
 
@@ -1637,18 +2072,14 @@ unsafe_vm() {
 # reliably inject them into Podman builds invoked through the Docker API.
 # Never use the user's global ~/.docker/config.json for Firebreak.
 configure_docker_client() {
-  [ -f "$ACTIVE_MODE" ] || die "Sandbox network profile unavailable: $ACTIVE_MODE"
-  active_mode=$(cat "$ACTIVE_MODE") || die 'Cannot read sandbox network profile'
+  [ -f "$ACTIVE_MODE" ] || panic $EX_SOFTWARE "Sandbox network profile unavailable: $ACTIVE_MODE"
+  active_mode=$(cat "$ACTIVE_MODE") || panic $EX_SOFTWARE 'Cannot read sandbox network profile'
   case $active_mode in
-    unsafe)
-      cli_mode=unsafe
-      ;;
-    offline|models)
-      cli_mode=work
-      ;;
-    *) die "Unexpected sandbox network profile: $active_mode" ;;
+    unsafe) cli_mode=unsafe ;;
+    offline|models) cli_mode=work ;;
+    *) panic $EX_SOFTWARE "Unexpected sandbox network profile: $active_mode" ;;
   esac
-  cli_dir=$STORE/docker/$NAME/$cli_mode
+  cli_dir="$OCI_STORE/$NAME/$cli_mode"
   mkdir -p "$cli_dir"
   if [ "$cli_mode" = unsafe ]; then
     cat <<'EOF_DOCKER_PROXY' | write_if_changed "$cli_dir/config.json"
@@ -1678,17 +2109,17 @@ EOF_DOCKER_PROXY
 ## firebreak_builder_name() { printf 'firebreak-%s-unsafe\n' "$NAME"; }
 ## prepare_firebreak_builder() {
 ##   [ "$cli_mode" = unsafe ] || return 0
-##   command -v docker >/dev/null 2>&1 || die 'Docker CLI is needed for the unsafe Buildx builder'
+##   command -v docker >/dev/null 2>&1 || panic $EX_UNAVAILABLE 'Docker CLI is needed for the unsafe Buildx builder'
 ##   BUILDX_BUILDER=$(firebreak_builder_name)
 ##   export BUILDX_BUILDER
 ##   if docker buildx inspect "$BUILDX_BUILDER" >/dev/null 2>&1; then
 ##     # Do not adopt an unrelated builder with our name and a different driver.
 ##     driver=$(docker buildx inspect "$BUILDX_BUILDER" | sed -n 's/^Driver:[[:space:]]*//p' | head -n 1)
-##     [ "$driver" = docker-container ] || die "Buildx builder $BUILDX_BUILDER has unexpected driver $driver"
+##     [ "$driver" = docker-container ] || panic $EX_PROTOCOL "Buildx builder $BUILDX_BUILDER has unexpected driver $driver"
 ##   else
 ##     docker buildx create --name "$BUILDX_BUILDER" \
 ##       --driver docker-container --driver-opt default-load=true >/dev/null || \
-##       die "Could not create Buildx builder $BUILDX_BUILDER"
+##       panic $EX_UNAVAILABLE "Could not create Buildx builder $BUILDX_BUILDER"
 ##   fi
 ## }
 ## cleanup_firebreak_builder() {
@@ -1701,99 +2132,166 @@ EOF_DOCKER_PROXY
 ##   docker_cfg=$STORE/docker/$NAME/unsafe
 ##   if DOCKER_CONFIG="$docker_cfg" DOCKER_HOST="unix://$VM_SOCKET" \
 ##      docker buildx inspect "$builder" >/dev/null 2>&1; then
-##     say "Stopping Firebreak Buildx builder $builder (keeping cache)..."
+##     info "Stopping Firebreak Buildx builder $builder (keeping cache)..."
 ##     DOCKER_CONFIG="$docker_cfg" DOCKER_HOST="unix://$VM_SOCKET" \
 ##       docker buildx rm --keep-state "$builder" || \
-##       say "Warning: Buildx cleanup failed; remove '$builder' manually in unsafe mode before switching to work."
+##       warn "Warning: Buildx cleanup failed; remove '$builder' manually in unsafe mode before switching to work."
 ##   fi
 ## }
 
-shell_env() {
-  [ -S "$VM_SOCKET" ] || die "No forwarded Podman socket"
+# Provide configuration paths for project-owned compose.
+# Note: bind mounts refer to locations inside the Alpine VM
+cmd_shell_env() {
+  [ -S "$VM_SOCKET" ] || panic $EX_USAGE "No forwarded Podman socket"
+  SHELL_MODE="$1"
+  shift
 
   configure_docker_client
-  export DOCKER_HOST="unix://$VM_SOCKET"
-  # prepare_firebreak_builder
-
+  DOCKER_HOST="unix://$VM_SOCKET"
   FIREBREAK_SANDBOX=$NAME
   FIREBREAK_MODE=$(cat "$ACTIVE_MODE")
   FIREBREAK_RUNTIME=$(runtime_for_profile "$FIREBREAK_MODE")
+  FIREBREAK_GIT_URL="http://host.containers.internal:$FORGEJO_PORT/firebreak/workspace.git"
+  FIREBREAK_GIT_CREDENTIALS_FILE=/var/lib/firebreak/worker-runtime/git-credentials
+  FIREBREAK_GIT_HELPER_FILE=/var/lib/firebreak/worker-runtime/git-credential-helper
+  FIREBREAK_GIT_USER="$GIT_USER"
+  FIREBREAK_GIT_EMAIL="$GIT_EMAIL"
+  export DOCKER_HOST FIREBREAK_SANDBOX FIREBREAK_MODE FIREBREAK_RUNTIME
+  export FIREBREAK_GIT_USER FIREBREAK_GIT_EMAIL FIREBREAK_GIT_URL FIREBREAK_GIT_CREDENTIALS_FILE FIREBREAK_GIT_HELPER_FILE
 
-  export FIREBREAK_SANDBOX
-  export FIREBREAK_MODE
-  export FIREBREAK_RUNTIME
+  # The Forgejo worker token is created by VM reconciliation. Do not require
+  # an import for unrelated Compose usage, but refuse stale/missing credentials
+  # when a workspace is already imported.
+  if [ -f "$SYNC_DIR/import-state" ]; then
+    ssh_vm 'test -s /var/lib/firebreak/worker-runtime/git-credentials && test -x /var/lib/firebreak/worker-runtime/git-credential-helper' </dev/null || \
+      panic $EX_CONFIG 'Worker credentials unavailable; restart the VM to reconcile provisioning'
+  fi
 
   case $FIREBREAK_MODE in
     unsafe) label=UNSAFE ;;
     offline) label=WORK ;;
     models) label=WORK-MODELS ;;
-    *) die "Unknown active mode: $FIREBREAK_MODE" ;;
+    *) panic $EX_SOFTWARE "Unknown active mode: $FIREBREAK_MODE" ;;
   esac
 
-  # Preserve noninteractive command execution.
-  if [ "$#" -gt 0 ]; then
+  # Preserve non-interactive command execution
+  if [ "$SHELL_MODE" = "sh" ] && [ "$#" -gt 0 ]; then
     exec "$@"
   fi
 
-  printf 'Firebreak: %s | %s | %s\n' \
-    "$NAME" "$label" "$FIREBREAK_RUNTIME"
-
-  PS1="[firebreak:$NAME:$label:$FIREBREAK_RUNTIME] \$ "
+  printf '%s: %s | %s | %s\n' "$CLI_NAME" "$NAME" "$label" "$FIREBREAK_RUNTIME"
+  PS1="[$CLI_NAME:$NAME:$label:$FIREBREAK_RUNTIME] \$ "
   export PS1
 
-  exec /bin/sh -i
+  case "$SHELL_MODE" in
+    sh) exec /bin/sh -i ;;
+    use)
+      _user="${1:-guest}"
+      _feature="${2:-opencode}"
+      _shell="${3:-bash}"
+      shift 3 || true
+      info "Starting '$_shell' session with feature '$_feature' as '$_user' using 'compose.yml'"
+
+      if [ ! -f "$STORE/compose.yml" ]; then
+        panic $EX_CONFIG "Compose mode needs at least a '$STORE/compose.yml' file, for unsafe-mode customization also provide '$STORE/compose.unsafe.override.yml'"
+      fi
+      set -- -f "$STORE/compose.yml"
+      if [ -f "$STORE/compose.$_feature.override.yml" ]; then
+        set -- "$@" -f "$STORE/compose.$_feature.override.yml"
+      fi
+      if [ "$FIREBREAK_MODE" = "unsafe" ] && [ -f "$STORE/compose.unsafe.override.yml" ]; then
+        set -- "$@" -f "$STORE/compose.unsafe.override.yml"
+      fi
+
+      # Note: Invoked by cleanup trap, if something goes wrong
+      # shellcheck disable=SC2329
+      cleanup() {
+        status=$?
+        trap - 0
+        docker compose "$@" down --remove-orphans || :
+        exit "$status"
+      }
+
+      trap 'cleanup "$@"' 0
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+
+      if [ "$FIREBREAK_MODE" = "unsafe" ]; then
+        docker compose "$@" up --build --force-recreate --detach || exit $?
+      else
+        docker compose "$@" up --force-recreate --detach || exit $?
+      fi
+
+      exec docker exec -u 1000 -it --workdir "/home/$_user" sandbox "$_shell"
+    ;;
+    *) panic $EX_SOFTWARE "Unknown shell mode $SHELL_MODE" ;;
+  esac
 }
 
-snapshot_vm() {
+cmd_vm_snapshot() {
   operation=$1
-  [ -f "$DISK" ] || die 'Sandbox disk does not exist'
-  [ ! -d "$DISK.lock" ] || die 'Stop sandbox before snapshots; disk is locked'
-  need qemu-img qemu
+
+  [ -f "$DISK" ] || panic $EX_NOINPUT 'Sandbox disk does not exist'
+  [ ! -d "$DISK.lock" ] || panic $EX_USAGE 'Stop sandbox before snapshots; disk is locked'
+
+  require qemu-img qemu
   if [ "$operation" = --list ]; then qemu-img snapshot -l "$DISK"; return; fi
-  label=$operation; action=${2:-}
-  valid_name "$label" || die 'Invalid snapshot name'
-  case $action in create|-c) flag=-c;; restore|-a) flag=-a;; delete|-d) flag=-d;; *) die 'Use snapshot NAME create|restore|delete';; esac
+  label=$operation
+  action=${2:-}
+
+  valid_name "$label" || panic $EX_DATAERR 'Invalid snapshot name'
+  case $action in
+    new) flag=-c ;;
+    restore) flag=-a ;;
+    delete) flag=-d ;;
+    *) panic $EX_USAGE 'Use snapshot NAME new|restore|delete' ;;
+  esac
   qemu-img snapshot "$flag" "$label" "$DISK"
   if [ "$action" = restore ]; then
-    rm -f "$SYNC_DIR/host-base" "$SYNC_DIR/guest-base"
+    rm -f "$SYNC_DIR/import-state" "$SYNC_DIR/import-pending" "$SYNC_DIR/import.bundle" "$SYNC_DIR/host-base" "$SYNC_DIR/guest-base"
     if [ "$label" = base ]; then
       rm -f "$SECRET/provisioned"
-      say 'Restored pristine base; run unsafe and complete initial provisioning before up.'
+      info 'Restored pristine base; run unsafe and complete initial provisioning before up.'
     else
-      say 'Snapshot restored; any pending Git sync was invalidated.'
+      info 'Snapshot restored; import metadata cleared (post-import snapshots require sync recovery).'
     fi
   fi
 }
 
-delete_vm() {
-  [ -f "$DISK" ] || die "Sandbox $NAME does not exist"
-  [ ! -d "$DISK.lock" ] || die 'Stop sandbox before deletion'
+cmd_vm_delete() {
+  [ -f "$DISK" ] || panic $EX_NOINPUT "Sandbox $NAME does not exist"
+  [ ! -d "$DISK.lock" ] || panic $EX_USAGE 'Stop sandbox before deletion'
   # Explicit name, explicit disk. Do NOT erase shared image cache or secrets.
-  rm -f "$DISK" "$SYNC_DIR/host-base" "$SYNC_DIR/guest-base"
-  say "Deleted disk $DISK (SSH and Forgejo secrets preserved)"
+  rm -f "$DISK" "$SYNC_DIR/import-state" "$SYNC_DIR/import-pending" "$SYNC_DIR/import.bundle" "$SYNC_DIR/host-base" "$SYNC_DIR/guest-base"
+  info "Deleted disk $DISK (SSH and Forgejo secrets preserved)"
 }
 
-# A host-side export never sends .git, host remotes, or credential configuration.
-# Git bundles are used in the other direction, avoiding unsafe guest tar extraction.
+# Only tracked host files enter the export. Forgejo Git HTTP moves objects;
+# temporary bundles remain host-side, and no guest-controlled tar is unpacked.
 git_host() { git -C "$ROOT" "$@"; }
+
 ssh_checked() {
-  [ -f "$DISK" ] || die 'Missing VM disk'
-  ssh_vm true </dev/null >/dev/null 2>&1 || die "Start '$0 $NAME up' or unsafe first"
+  [ -f "$DISK" ] || panic $EX_NOINPUT 'Missing VM disk'
+  ssh_vm true </dev/null >/dev/null 2>&1 || panic $EX_UNAVAILABLE "Start '$0 $NAME up' or unsafe first"
 }
+
 make_snapshot_repo() {
-  export_dir=$1 history=$2 depth=$3
+  export_dir=$1
+  history=$2
+  depth=$3
+
   mkdir -p "$export_dir/repo"
   case $history in
     full)
       # A normal clone includes the real repository history and checked-out HEAD.
       rmdir "$export_dir/repo"
-      git clone -q --no-local "$ROOT" "$export_dir/repo" || die 'Unable to clone host repository'
+      git clone -q --no-local "$ROOT" "$export_dir/repo" || panic $EX_PROTOCOL 'Unable to clone host repository'
       git -C "$export_dir/repo" checkout -q -B main "$(git_host rev-parse HEAD)"
-      ;;
+    ;;
     snapshot|shallow)
       git -C "$export_dir/repo" init -q
       if [ "$history" = snapshot ]; then
-        commits=$(git_host rev-parse HEAD) || die 'Git repository requires HEAD'
+        commits=$(git_host rev-parse HEAD) || panic $EX_PROTOCOL 'Git repository requires HEAD'
       else
         commits=$(git_host rev-list --max-count="$depth" HEAD | sed '1!G;h;$!d')
       fi
@@ -1811,13 +2309,13 @@ make_snapshot_repo() {
             commit -q --allow-empty -m "$(git_host log -1 --format=%s "$commit")"
         fi
       done
-      ;;
-    *) die 'Unsupported history policy';;
+    ;;
+    *) panic $EX_SOFTWARE 'Unsupported history policy';;
   esac
   # Incorporate modifications to TRACKED host files; no untracked files.
   git_host diff --binary HEAD > "$export_dir/working.patch"
   if [ -s "$export_dir/working.patch" ]; then
-    git -C "$export_dir/repo" apply "$export_dir/working.patch" || die 'Could not apply tracked working tree changes'
+    git -C "$export_dir/repo" apply "$export_dir/working.patch" || panic $EX_SOFTWARE 'Could not apply tracked working tree changes'
   fi
   if [ "$history" = snapshot ]; then
     git -C "$export_dir/repo" add -A
@@ -1832,202 +2330,401 @@ make_snapshot_repo() {
   git -C "$export_dir/repo" bundle create "$export_dir/import.bundle" refs/heads/main
 }
 
-# This command is SSH-side, not user-supplied code. The only interpolation is a
-# previously validated sandbox name, fixed repository name, and generated hex.
-guest_import_cmd() {
-  printf 'REPLACE=%s\n' "$replace"
-  cat <<'EOF_GUEST'
-set -eu
-umask 077
-mkdir -p /var/lib/firebreak/workspaces/default
-cd /var/lib/firebreak/workspaces/default
-if [ ! -d .git ]; then git init -q; fi
-# The bundle has already been transferred in a separate SSH invocation.
-# Refuse to erase uncommitted work or an existing imported history by default.
-git diff --quiet && git diff --cached --quiet || exit 11
-if git remote get-url origin >/dev/null 2>&1 && [ "$REPLACE" != yes ]; then
-  echo 'Existing Forgejo workspace; pull first, then push --replace if desired' >&2
-  exit 13
-fi
-git fetch -q /var/lib/firebreak/incoming.bundle refs/heads/main
-git checkout -q -B main FETCH_HEAD
-# Create the Forgejo repository once, via the VM-local API.
-code=$(curl -sS -o /dev/null -w '%{http_code}' -u "firebreak:$(cat /etc/firebreak/forgejo-password)" \
-  http://127.0.0.1:3001/api/v1/repos/firebreak/workspace)
-if [ "$code" = 404 ]; then
-  curl -fsS -u "firebreak:$(cat /etc/firebreak/forgejo-password)" \
-    -H 'Content-Type: application/json' -X POST \
-    -d '{"name":"workspace","private":true,"default_branch":"main"}' \
-    http://127.0.0.1:3001/api/v1/user/repos >/dev/null
-elif [ "$code" != 200 ]; then
-  echo "Forgejo repository lookup returned HTTP $code" >&2; exit 12
-fi
-if git remote get-url origin >/dev/null 2>&1; then git remote remove origin; fi
-git remote add origin http://127.0.0.1:3001/firebreak/workspace.git
-git config credential.helper 'store --file=/etc/firebreak/forgejo-credentials'
-if [ "$REPLACE" = yes ]; then
-  git push -q --force-with-lease -u origin main
-else
-  git push -q -u origin main
-fi
-rm -f /var/lib/firebreak/incoming.bundle
-EOF_GUEST
+# A short-lived authenticated Git client for the host-side localhost tunnel.
+# The administrator password is read from the protected host secret file only
+# when Git prompts for it. Nothing is written into the exported Git repository.
+prepare_forgejo_host_auth() {
+  require curl
+  HOST_FORGEJO_NETRC=$temp/forgejo.netrc
+  HOST_FORGEJO_ASKPASS=$temp/forgejo-askpass
+  printf 'machine 127.0.0.1 login firebreak password %s\n' "$(cat "$SECRET/forgejo-password")" > "$HOST_FORGEJO_NETRC"
+  chmod 600 "$HOST_FORGEJO_NETRC"
+  cat > "$HOST_FORGEJO_ASKPASS" <<'EOF_ADMIN_ASKPASS'
+#!/bin/sh
+case $1 in
+  *Username*) printf 'firebreak\n' ;;
+  *Password*) cat "$FIREBREAK_HOST_ADMIN_PASSWORD_FILE" ;;
+  *) exit 1 ;;
+esac
+EOF_ADMIN_ASKPASS
+  chmod 700 "$HOST_FORGEJO_ASKPASS"
+  FORGEJO_HOST_URL="http://127.0.0.1:$FORGEJO_PORT/firebreak/workspace.git"
+  FORGEJO_API_URL="http://127.0.0.1:$FORGEJO_PORT/api/v1"
 }
 
-sync_push() {
-  history=$GIT_IMPORT depth=5 replace=no allow_sensitive=no
-  for opt do case $opt in
-    --history=*) history=${opt#*=};;
-    --depth=*) depth=${opt#*=};;
-    --replace) replace=yes;;
-    --allow-sensitive-tracked) allow_sensitive=yes;;
-    *) die "Unknown push option: $opt";;
-  esac; done
-  case $history in snapshot|shallow|full) :;; *) die 'Expected --history=snapshot|shallow|full';; esac
-  case $depth in ''|*[!0-9]*) die 'depth must be integer';; esac
-  [ "$depth" -ge 1 ] && [ "$depth" -le 50 ] || die 'depth must be 1..50'
-  need git; need tar
-  git_host rev-parse --verify HEAD >/dev/null 2>&1 || die 'Run push from a Git repository with at least one commit'
+forgejo_api() {
+  curl --noproxy '*' \
+    --connect-timeout 5 \
+    --max-time 40 \
+    --netrc-file "$HOST_FORGEJO_NETRC" -sS "$@"
+}
+
+forgejo_host_git() (
+  GIT_ASKPASS=$HOST_FORGEJO_ASKPASS
+  FIREBREAK_HOST_ADMIN_PASSWORD_FILE=$SECRET/forgejo-password
+  GIT_ASKPASS_REQUIRE=force
+  GIT_TERMINAL_PROMPT=0
+  GIT_CONFIG_GLOBAL=/dev/null
+  GIT_CONFIG_NOSYSTEM=1
+  export GIT_ASKPASS FIREBREAK_HOST_ADMIN_PASSWORD_FILE GIT_ASKPASS_REQUIRE GIT_TERMINAL_PROMPT
+  export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+  # Clear inherited credential helpers and HTTP proxy settings. The only
+  # allowed endpoint is the SSH-forwarded, host-loopback Forgejo instance.
+  git -c credential.helper= -c http.proxy= "$@"
+)
+
+# Only repository API operations use the admin identity. No guest Git
+# checkout is ever created, and the admin token is never mounted into Compose.
+ensure_forgejo_repository() {
+  code=$(forgejo_api -o /dev/null -w '%{http_code}' \
+    "$FORGEJO_API_URL/repos/firebreak/workspace") || panic $EX_UNAVAILABLE 'Cannot query Forgejo repository'
+  case $code in
+    200) : ;;
+    404)
+      forgejo_api -f -H 'Content-Type: application/json' -X POST \
+        -d '{"name":"workspace","private":true,"default_branch":"main"}' \
+        "$FORGEJO_API_URL/user/repos" >/dev/null || panic $EX_CANTCREAT 'Could not create Forgejo repository'
+    ;;
+    *) panic $EX_PROTOCOL "Forgejo repository lookup returned HTTP $code" ;;
+  esac
+}
+
+# The worker's rights are enforced by Forgejo, not by a client-side hook.
+ensure_forgejo_worker_permissions() {
+  # Ensure the guest has generated its worker token, but never copy it to Mac.
+  ssh_vm 'test -s /etc/firebreak/forgejo-worker-token && test -r /var/lib/firebreak/worker-runtime/git-credentials' </dev/null || \
+    panic $EX_NOINPUT 'Worker token missing from Alpine; restart the sandbox to reconcile Forgejo'
+  protect="$FORGEJO_API_URL/repos/firebreak/workspace/branch_protections/main"
+  code=$(forgejo_api -o /dev/null -w '%{http_code}' "$protect") || \
+    panic $EX_PROTOCOL 'Cannot inspect Forgejo branch protection'
+  # Deliberately leave admins exempt so Firebreak can perform maintenance.
+  policy='{"rule_name":"main","enable_push":false,"enable_push_whitelist":false,"enable_force_push":false,"apply_to_admins":false}'
+  case $code in
+    404)
+      forgejo_api -f -X POST -H 'Content-Type: application/json' -d "$policy" \
+        "$FORGEJO_API_URL/repos/firebreak/workspace/branch_protections" >/dev/null || \
+        panic $EX_PROTOCOL 'Could not protect Forgejo main'
+    ;;
+    200)
+      forgejo_api -f -X PATCH -H 'Content-Type: application/json' -d "$policy" \
+        "$protect" >/dev/null || panic $EX_PROTOCOL 'Could not reconcile Forgejo main protection'
+    ;;
+    *) panic $EX_PROTOCOL "Forgejo main protection query returned HTTP $code" ;;
+  esac
+  protection=$(forgejo_api -f "$protect") || panic $EX_PROTOCOL 'Cannot verify Forgejo main protection'
+  printf '%s' "$protection" | grep -Eq '"enable_push"[[:space:]]*:[[:space:]]*false' || \
+    panic $EX_PROTOCOL 'Forgejo main allows pushes; refusing to finish import'
+  # Only grant write access AFTER main's protection has been verified.
+  forgejo_api -f -X PUT -H 'Content-Type: application/json' \
+    -d '{"permission":"write"}' \
+    "$FORGEJO_API_URL/repos/firebreak/workspace/collaborators/sbx-worker" >/dev/null || \
+    panic $EX_PROTOCOL 'Cannot grant Forgejo worker repository access'
+  perm=$(forgejo_api -f \
+    "$FORGEJO_API_URL/repos/firebreak/workspace/collaborators/sbx-worker/permission") || \
+    panic $EX_PROTOCOL 'Cannot verify Forgejo worker permissions'
+  printf '%s' "$perm" | grep -Eq '"permission"[[:space:]]*:[[:space:]]*"write"' || \
+    panic $EX_PROTOCOL 'Forgejo worker did not receive Write permission'
+  # Authenticated read of the imported work branch using the worker token.
+  ssh_vm "FIREBREAK_GIT_CREDS=/var/lib/firebreak/worker-runtime/git-credentials GIT_TERMINAL_PROMPT=0 git -c credential.helper='!/var/lib/firebreak/worker-runtime/git-credential-helper' -c http.proxy= ls-remote 'http://127.0.0.1:$FORGEJO_PORT/firebreak/workspace.git' refs/heads/work" \
+    </dev/null >/dev/null || panic $EX_NOINPUT 'Worker credential cannot read Forgejo work branch'
+  # ssh_vm "GIT_TERMINAL_PROMPT=0 git -c credential.helper='!/var/lib/firebreak/worker-runtime/git-credential-helper' -c http.proxy= ls-remote 'http://127.0.0.1:$FORGEJO_PORT/firebreak/workspace.git' refs/heads/work" \
+  #   </dev/null >/dev/null || panic $EX_NOINPUT 'Worker credential cannot read Forgejo work branch'
+}
+
+# Temporary bare repositories receive data from the local host's exported
+# bundle (push) or directly from Forgejo (pull). No persistent guest checkout.
+read_forgejo_refs() {
+  refs=$(forgejo_host_git ls-remote --heads "$FORGEJO_HOST_URL" main work) || \
+    panic $EX_PROTOCOL 'Cannot inspect Forgejo Git refs'
+  remote_main=$(printf '%s\n' "$refs" | awk '$2 == "refs/heads/main" {print $1}')
+  remote_work=$(printf '%s\n' "$refs" | awk '$2 == "refs/heads/work" {print $1}')
+}
+
+# One invocation grants a specific host state to the sandbox. The import-state
+# file is a single atomic record so interrupted writes cannot create a half
+# valid pair of host/guest baselines. Pull does not clear this record.
+cmd_sync_push() {
+  history=$GIT_IMPORT
+  depth=5
+  allow_sensitive=no
+
+  for opt do
+    case $opt in
+      --history=*) history=${opt#*=} ;;
+      --depth=*) depth=${opt#*=} ;;
+      # --allow-sensitive-tracked) allow_sensitive=yes ;;
+      # --replace) panic $EX_SOFTWARE 'Import is one-shot; create/restore a sandbox instead of --replace' ;;
+      *) panic $EX_USAGE "Unknown push option: $opt" ;;
+    esac
+  done
+  case $history in
+    snapshot|shallow|full) : ;;
+    *) panic $EX_USAGE 'Expected --history=snapshot|shallow|full' ;;
+  esac
+  case $depth in
+    ''|*[!0-9]*) panic $EX_USAGE 'depth must be integer' ;;
+  esac
+  [ "$depth" -ge 1 ] && [ "$depth" -le 50 ] || panic $EX_USAGE 'depth must be 1..50'
+
+  require git
+  require tar
+
+  git_host rev-parse --verify HEAD >/dev/null 2>&1 || panic $EX_USAGE 'Run push from a Git repository with at least one commit'
   if [ "$allow_sensitive" = no ]; then
     flagged=$(git_host ls-files -- '.env' '.env.*' '**/.env' '**/.env.*' '.npmrc' '**/.npmrc' '.pypirc' '**/.pypirc' '*.pem' '*.p12' '*.key' 2>/dev/null)
-    [ -z "$flagged" ] || die 'Tracked files match common secret paths; inspect them and explicitly pass --allow-sensitive-tracked if intentional'
+    [ -z "$flagged" ] || panic $EX_DATAERR 'Tracked files match common secret paths; inspect them and explicitly pass --allow-sensitive-tracked if intentional'
   fi
+  [ ! -e "$SYNC_DIR/import-state" ] || panic $EX_USAGE 'This sandbox has already been imported; use pull, or start a new sandbox'
+  [ ! -e "$SYNC_DIR/host-base" ] && [ ! -e "$SYNC_DIR/guest-base" ] || \
+    panic $EX_USAGE 'Legacy sync metadata exists; do not reimport until it has been reviewed'
   ssh_checked
+
   mkdir -p "$SYNC_DIR" "$TMP"
-  [ ! -f "$SYNC_DIR/host-base" ] || die 'Pending import exists: pull first or archive/remove the sync metadata intentionally'
-  temp=$(mktemp -d "$TMP/export.XXXXXX") || die 'Cannot create temporary export'
+  temp=$(mktemp -d "$TMP/import.XXXXXX") || panic $EX_CANTCREAT 'Cannot create import temporary directory'
   trap 'rm -rf "$temp"' EXIT HUP INT TERM
-  make_snapshot_repo "$temp" "$history" "$depth"
-  guestbase=$(git -C "$temp/repo" rev-parse HEAD)
-  hostbase=$(git_host rev-parse HEAD)
-  # Use two SSH calls: first send the bundle; then execute a fixed guest script.
-  # No host Git remote URLs or authentication secrets are transmitted.
-  ssh_vm 'umask 077; mkdir -p /var/lib/firebreak; cat > /var/lib/firebreak/incoming.bundle' < "$temp/import.bundle"
-  guest_import_cmd | ssh_vm '/bin/sh -s' || die 'Guest import failed (existing guest commits may require pull first)'
-  printf '%s\n' "$hostbase" > "$SYNC_DIR/host-base"
-  printf '%s\n' "$guestbase" > "$SYNC_DIR/guest-base"
-  say "Imported tracked files as $history history; guest baseline $guestbase"
+  prepare_forgejo_host_auth
+
+  if [ -f "$SYNC_DIR/import-pending" ] && [ -f "$SYNC_DIR/import.bundle" ]; then
+    read -r hostbase guestbase previous_history previous_depth < "$SYNC_DIR/import-pending" || \
+      panic $EX_NOINPUT 'Cannot read pending import metadata'
+    [ "$history" = "$previous_history" ] && [ "$depth" = "$previous_depth" ] || \
+      panic $EX_TEMPFAIL 'An import is pending; retry with the same history and depth options'
+    info 'Resuming the original interrupted import; host changes since its creation are not included.'
+  else
+    [ ! -e "$SYNC_DIR/import-pending" ] && [ ! -e "$SYNC_DIR/import.bundle" ] || \
+      panic $EX_SOFTWARE 'Incomplete pending import state; inspect sync directory before retrying'
+    make_snapshot_repo "$temp" "$history" "$depth"
+    guestbase=$(git -C "$temp/repo" rev-parse HEAD)
+    hostbase=$(git_host rev-parse HEAD)
+    state_tmp=$(mktemp "$SYNC_DIR/import-pending.XXXXXX") || panic $EX_CANTCREAT 'Cannot stage import baseline'
+    printf '%s %s %s %s\n' "$hostbase" "$guestbase" "$history" "$depth" > "$state_tmp"
+    mv -f "$temp/import.bundle" "$SYNC_DIR/import.bundle"
+    mv -f "$state_tmp" "$SYNC_DIR/import-pending"
+  fi
+
+  # Reconstruct the exact same authorized commit from the preserved bundle.
+  git init -q --bare "$temp/import.git"
+  git --git-dir="$temp/import.git" fetch -q "$SYNC_DIR/import.bundle" \
+    '+refs/heads/main:refs/heads/main' || panic $EX_NOINPUT 'Could not read pending import bundle'
+  incoming=$(git --git-dir="$temp/import.git" rev-parse refs/heads/main) || panic $EX_NOINPUT 'Missing bundle main'
+  [ "$incoming" = "$guestbase" ] || panic $EX_DATAERR 'Pending import metadata does not match its bundle'
+  git --git-dir="$temp/import.git" update-ref refs/heads/work "$incoming"
+  ensure_forgejo_repository
+  read_forgejo_refs
+
+  [ -n "$remote_main" ] || [ -z "$remote_work" ] || \
+    panic $EX_SOFTWARE 'Forgejo has work without main; manual recovery required'
+  if [ -n "$remote_main" ] && [ "$remote_main" != "$incoming" ]; then
+    panic $EX_CANTCREAT 'Forgejo main differs from the pending import; refusing to overwrite it'
+  fi
+  if [ -n "$remote_work" ]; then
+    forgejo_host_git --git-dir="$temp/import.git" fetch -q "$FORGEJO_HOST_URL" \
+      '+refs/heads/work:refs/remotes/forgejo/work' || panic $EX_NOINPUT 'Could not fetch existing Forgejo work'
+    git --git-dir="$temp/import.git" merge-base --is-ancestor \
+      "$incoming" refs/remotes/forgejo/work || panic $EX_SOFTWARE 'Existing Forgejo work has an unexpected baseline'
+  fi
+
+  # Publish the host-owned baseline first, then create work if still absent.
+  # Neither operation uses force; an interrupted run can safely resume.
+  if [ -z "$remote_main" ]; then
+    forgejo_host_git --git-dir="$temp/import.git" push -q "$FORGEJO_HOST_URL" \
+      refs/heads/main:refs/heads/main || panic $EX_SOFTWARE 'Forgejo refused the baseline push'
+  fi
+  if [ -z "$remote_work" ]; then
+    forgejo_host_git --git-dir="$temp/import.git" push -q "$FORGEJO_HOST_URL" \
+      refs/heads/work:refs/heads/work || panic $EX_SOFTWARE 'Forgejo refused the initial work push'
+  fi
+
+  ensure_forgejo_worker_permissions
+  # Only mark complete after main/work are published AND worker protection works.
+  state_tmp=$(mktemp "$SYNC_DIR/import-state.XXXXXX") || panic $EX_CANTCREAT 'Cannot record import baseline'
+  printf '%s %s\n' "$hostbase" "$guestbase" > "$state_tmp"
+  mv -f "$state_tmp" "$SYNC_DIR/import-state"
+  rm -f "$SYNC_DIR/import-pending" "$SYNC_DIR/import.bundle"
+  info "Imported tracked files as $history history (guest baseline $guestbase)."
+  info 'Forgejo: immutable main and sandbox-owned work; clone work inside your project container.'
 }
 
+# Import a committed Forgejo checkpoint as a synthetic host-side review commit,
+# The guest baseline is trusted only if it is an ancestor of the exported work.
 create_review_branch() {
-  bundle=$1 hostbase=$2 guestbase=$3
-  git_host fetch -q "$bundle" 'refs/remotes/origin/main' || die 'Could not import sandbox bundle'
+  bundle=$1
+  hostbase=$2
+  guestbase=$3
+
+  git_host fetch -q "$bundle" 'refs/heads/work' || panic $EX_PROTOCOL 'Could not import sandbox bundle'
   guesttip=$(git_host rev-parse FETCH_HEAD)
-  git_host cat-file -e "$guestbase^{commit}" 2>/dev/null || die 'Guest baseline is missing from fetched history'
-  git_host merge-base --is-ancestor "$guestbase" "$guesttip" || die 'Guest history was rewritten; refusing unsafe sync'
-  # Export the entire resulting tree relative to the original HOST commit.
-  # This includes tracked-but-dirty files from the initial import.
+  git_host cat-file -e "$guestbase^{commit}" 2>/dev/null || panic $EX_NOINPUT 'Guest baseline is missing from fetched history'
+  git_host merge-base --is-ancestor "$guestbase" "$guesttip" || panic $EX_USAGE 'Guest history was rewritten; refusing unsafe sync'
+  if git_host diff --quiet "$guestbase" "$guesttip"; then
+    info 'No committed sandbox file changes to export yet.'
+    return 0
+  fi
+  # Export resulting guest tree relative to the original HOST commit.
+  # Host tracked-but-dirty input is included; host working tree is untouched.
   git_host diff --binary "$hostbase" "$guesttip" > "$temp/changes.patch"
   GIT_INDEX_FILE=$temp/index; export GIT_INDEX_FILE
   git_host read-tree "$hostbase"
   if [ -s "$temp/changes.patch" ]; then
-    git_host apply --cached "$temp/changes.patch" || die 'Sandbox changes conflict with host baseline; review diff manually'
+    git_host apply --cached "$temp/changes.patch" || panic $EX_SOFTWARE 'Sandbox changes conflict with host baseline; review diff manually'
   fi
   tree=$(git_host write-tree)
   branch=firebreak/$NAME/$(printf '%s' "$guesttip" | cut -c1-12)
-  if git_host show-ref --verify --quiet "refs/heads/$branch"; then die "Branch already exists: $branch"; fi
+  if git_host show-ref --verify --quiet "refs/heads/$branch"; then
+    info "Already exported this checkpoint as $branch; left existing branch untouched."
+    return 0
+  fi
   commit=$(printf 'Import sandbox %s changes from %s\n' "$NAME" "$guesttip" | \
     git_host -c user.name="$GIT_USER" -c user.email="$GIT_EMAIL" commit-tree "$tree" -p "$hostbase")
-  git_host update-ref "refs/heads/$branch" "$commit" '0000000000000000000000000000000000000000'
-  say "Created host review branch $branch (host working tree untouched)."
+  git_host update-ref "refs/heads/$branch" "$commit" '0000000000000000000000000000000000000000' || \
+    panic $EX_CANTCREAT 'Could not create host review branch'
+  info "Created host review branch $branch (host working tree untouched)."
 }
 
-sync_pull() {
-  need git
+cmd_sync_pull() {
+  require git
+
+  [ -f "$SYNC_DIR/import-state" ] || panic $EX_NOINPUT 'No recorded import: push first'
+  read -r hostbase guestbase < "$SYNC_DIR/import-state" || panic $EX_NOINPUT 'Cannot read import baseline'
+  git_host cat-file -e "$hostbase^{commit}" 2>/dev/null || panic $EX_NOINPUT 'Original host baseline commit is missing'
+  case $guestbase in
+    ''|*[!0-9a-f]*) panic $EX_SOFTWARE 'Corrupt guest baseline metadata' ;;
+  esac
+  case ${#guestbase} in
+    40|64) : ;;
+    *) panic $EX_SOFTWARE 'Corrupt guest baseline metadata' ;;
+  esac
   ssh_checked
-  [ -f "$SYNC_DIR/host-base" ] && [ -f "$SYNC_DIR/guest-base" ] || die 'No recorded import: push first'
-  hostbase=$(cat "$SYNC_DIR/host-base")
-  guestbase=$(cat "$SYNC_DIR/guest-base")
-  temp=$(mktemp -d "$TMP/pull.XXXXXX") || die 'Cannot create pull directory'
+  temp=$(mktemp -d "$TMP/pull.XXXXXX") || panic $EX_CANTCREAT 'Cannot create pull temporary directory'
   trap 'rm -rf "$temp"' EXIT HUP INT TERM
-  # Fetch the latest Forgejo main into the guest workspace; the host only gets
-  # a verified Git bundle and never extracts guest-controlled tar archives.
-  ssh_vm "git -C /var/lib/firebreak/workspaces/default fetch -q origin main && git -C /var/lib/firebreak/workspaces/default bundle create - refs/remotes/origin/main" > "$temp/return.bundle" || die 'Cannot export Forgejo repository'
-  bundle=$temp/return.bundle
-  create_review_branch "$bundle" "$hostbase" "$guestbase"
-  rm -f "$SYNC_DIR/host-base" "$SYNC_DIR/guest-base"
+  prepare_forgejo_host_auth
+
+  git init -q --bare "$temp/forgejo.git"
+  # Fetch only Forgejo's two published branches over the localhost tunnel.
+  # There is no guest checkout and no guest-generated tar to unpack.
+  forgejo_host_git --git-dir="$temp/forgejo.git" fetch -q "$FORGEJO_HOST_URL" \
+    '+refs/heads/main:refs/heads/main' '+refs/heads/work:refs/heads/work' || \
+    panic $EX_PROTOCOL 'Cannot fetch Forgejo main and work'
+  actual_main=$(git --git-dir="$temp/forgejo.git" rev-parse refs/heads/main) || panic $EX_SOFTWARE 'Forgejo has no main'
+  [ "$actual_main" = "$guestbase" ] || panic $EX_DATAERR 'Forgejo baseline main was changed; refusing export'
+  git --git-dir="$temp/forgejo.git" merge-base --is-ancestor \
+    "$guestbase" refs/heads/work || panic $EX_DATAERR 'Forgejo work does not descend from the authorized baseline'
+  git --git-dir="$temp/forgejo.git" bundle create "$temp/return.bundle" refs/heads/work || \
+    panic $EX_CANTCREAT 'Could not create review bundle'
+
+  create_review_branch "$temp/return.bundle" "$hostbase" "$guestbase"
+  # Import record stays intact: subsequent checkpoints are non-destructive.
 }
 
-doctor_vm() {
-  say "Firebreak $VERSION, sandbox $NAME"
-  say "  image: $(image_name)"
-  say "  disk: $DISK"
-  say "  exists: $(test -f "$DISK" && echo yes || echo no)"
-  say "  provisioned: $(test -f "$SECRET/provisioned" && echo yes || echo no)"
-  say "  locked: $(test -d "$DISK.lock" && echo yes || echo no)"
-  say "  network_work: $NETWORK_WORK (QEMU restrict=on in all profiles)"
-  say "  ssh port: $SSH_PORT; Forgejo: $FORGEJO_PORT"
-  if [ -f "$SECRET/storage" ]; then say "  storage: $(cat "$SECRET/storage")"; fi
-  if [ -f "$SEED/network-config" ]; then say "  seed MAC: $(grep macaddress "$SEED/network-config" | tr -d ' \"')"; fi
+cmd_vm_doctor() {
+  info "$CLI_NAME $CLI_VERSION, sandbox $NAME"
+  info "  image: $(image_name)"
+  info "  disk: $DISK"
+  info "  exists: $(test -f "$DISK" && echo yes || echo no)"
+  info "  provisioned: $(test -f "$SECRET/provisioned" && echo yes || echo no)"
+  info "  locked: $(test -d "$DISK.lock" && echo yes || echo no)"
+  info "  network_work: $NETWORK_WORK (QEMU restrict=on in all profiles)"
+  info "  ssh port: $SSH_PORT; Forgejo: $FORGEJO_PORT"
+  if [ -f "$SECRET/storage" ]; then
+    info "  storage: $(cat "$SECRET/storage")"
+  fi
+  if [ -f "$SEED/network-config" ]; then
+    info "  seed MAC: $(grep macaddress "$SEED/network-config" | tr -d ' \"')"
+  fi
   if ssh_vm true </dev/null >/dev/null 2>&1; then
-    say '  SSH: reachable'
+    info '  SSH: reachable'
     ssh_vm 'cloud-init status || true; rc-service forgejo status || true; rc-service podman status || true'
-  else say '  SSH: not reachable (VM may be off)'; fi
+  else
+    info '  SSH: not reachable (VM may be off)'
+  fi
 }
 
-self_test() {
-  sh -n "$0" || die 'POSIX shell parser rejected firebreak'
+cmd_self_test() {
+  sh -n "$0" || panic $EX_DATAERR 'POSIX shell parser rejected firebreak'
   for mode in offline models unsafe; do
     args=$(net_args "$mode")
-    case $args in *restrict=on*) :;; *) die "Unrestricted $mode policy";; esac
+    case $args in
+      *restrict=on*) : ;;
+      *) panic $EX_SOFTWARE "Unrestricted $mode policy forbidden" ;;
+    esac
   done
-  case $(net_args offline) in *10.0.2.100:3128*) die 'Offline mode exposes proxy';; esac
-  valid_name valid-demo || die 'Name policy broke'
-  if valid_name '../escape'; then die 'Traversal accepted'; fi
-  say 'Built-in configuration and isolation-policy smoke checks passed.'
-  config_cmd proxy-check
-  # config_cmd proxy-check --online
+  case $(net_args offline) in
+    *10.0.2.100:3128*) panic $EX_SOFTWARE 'Offline mode exposes proxy' ;;
+  esac
+  valid_name valid-demo || panic $EX_SOFTWARE 'Name policy broke'
+  if valid_name '../escape'; then
+    panic $EX_SOFTWARE 'Traversal accepted'
+  fi
+  info 'Built-in configuration and isolation-policy smoke checks passed.'
+  cmd_config proxy-check
+  # cmd_config proxy-check --online
     # proxy-check)
-    #   case ${1:-} in ''|--online) :;; *) die 'proxy-check accepts only --online';; esac
+    #   case ${1:-} in ''|--online) :;; *) panic $EX_SOFTWARE 'proxy-check accepts only --online';; esac
 }
+
 main() {
   case ${1:-} in
-    --self-test) self_test; exit 0;;
-    --version) printf '%s\n' "$VERSION"; exit 0;;
-    --help|-h|'') usage; exit 0;;
+    --self-test) cmd_self_test; exit $EX_OK ;;
+    --version) printf '%s\n' "$CLI_VERSION"; exit $EX_OK ;;
+    --help|'') print_usage ;;
     --list)
-      for img in "$VMS"/*.qcow2; do [ -f "$img" ] && printf '%s\n' "${img##*/}"; done
-      exit 0;;
-    config) shift; config_cmd "$@"; exit 0;;
+      for img in "$VMS"/*.qcow2; do
+        [ -f "$img" ] && printf '%s\n' "${img##*/}"
+      done
+      exit $EX_OK
+    ;;
+    config) shift; cmd_config "$@"; exit $EX_OK ;;
   esac
-  [ -f "$ROOT/$CONF" ] || die "Run '$0 config init' first"
-  load
-  [ "$#" -ge 2 ] || die 'Expected: firebreak NAME COMMAND'
-  vm_paths "$1"
-  cmd=$2; shift 2
+
+  [ -f "$CONF" ] || panic $EX_USAGE "Run '$CLI_NAME config init' first"
+  load_conf
+  [ "$#" -ge 2 ] || print_usage
+  configure_vm_paths "$1"
+
+  cmd="$2"
+  shift 2
   case $cmd in
-    create) create_vm "$@";;
-    unsafe) [ "$#" -eq 0 ] || die 'unsafe takes no arguments'; unsafe_vm;;
-    unsafe-qemu) [ "$#" -eq 0 ] || die 'unsafe takes no arguments'; unsafe_qemu_vm;;
-    # repair|provision) [ "$#" -eq 0 ] || die "$cmd takes no arguments"; provision_vm;;
-    debug) [ "$#" -eq 0 ] || die 'debug takes no arguments'; debug_vm;;
-    console-password) [ "$#" -eq 0 ] || die 'console-password takes no arguments'; console_password;;
-    logs) show_logs "$@";;
-    up) [ "$#" -eq 0 ] || die 'up takes no arguments'; up_vm;;
-    sh) shell_env "$@";;
-    snapshot) [ "$#" -ge 1 ] || die 'Specify a snapshot name'; snapshot_vm "$@";;
-    push) sync_push "$@";;
-    pull) [ "$#" -eq 0 ] || die 'pull takes no arguments'; sync_pull;;
-    doctor) doctor_vm;;
-    delete) delete_vm;;
-    __test-runtime) [ "$#" -eq 1 ] || die 'Expected runtime profile'; runtime_for_profile "$1";;
-    __test-net) [ "$#" -eq 1 ] || die 'Expected test mode'; net_args "$1";;
+    new) cmd_vm_new "$@" ;;
+    unsafe) [ "$#" -eq 0 ] || panic $EX_USAGE 'unsafe takes no arguments'; cmd_vm_unsafe ;;
+    logs) cmd_logs "$@" ;;
+    up) [ "$#" -eq 0 ] || panic $EX_USAGE 'up takes no arguments'; cmd_vm_up ;;
+    sh) cmd_shell_env "sh" "$@" ;;
+    use) cmd_shell_env "use" "${1:-}" "${2:-}" "${3:-}" ;;
+    snapshot) [ "$#" -ge 1 ] || panic $EX_USAGE 'Specify a snapshot name'; cmd_vm_snapshot "$@" ;;
+    push) cmd_sync_push "$@" ;;
+    pull) [ "$#" -eq 0 ] || panic $EX_USAGE 'pull takes no arguments'; cmd_sync_pull ;;
+    doctor) cmd_vm_doctor ;;
+    delete) cmd_vm_delete ;;
+    __test-runtime) [ "$#" -eq 1 ] || panic $EX_USAGE 'Expected runtime profile'; runtime_for_profile "$1" ;;
+    __test-net) [ "$#" -eq 1 ] || panic $EX_USAGE 'Expected test mode'; net_args "$1" ;;
     __test-qemu)
-      [ "$#" -eq 1 ] || die 'Expected serial mode'
+      [ "$#" -eq 1 ] || panic $EX_USAGE 'Expected serial mode'
       SERIAL_LOG=$TMP/$NAME.serial.log
       FIRMWARE=$IMAGES/test-firmware
       MAC=$(mac_from_string "$VERSION-$BUILD-$NAME")
-      qemu_vm "$DISK" "$SEEDS/$NAME" "$MAC" unsafe "$1";;
-    __test-render) render_seed "$NAME"; printf '%s\n' "$SEED";;
+      qemu_vm "$DISK" "$SEEDS/$NAME" "$MAC" unsafe "$1"
+    ;;
+    __test-render) render_seed "$NAME"; printf '%s\n' "$SEED" ;;
     __test-export)
-      [ "$#" -eq 3 ] || die 'Expected DIRECTORY HISTORY DEPTH'
-      make_snapshot_repo "$1" "$2" "$3";;
+      [ "$#" -eq 3 ] || panic $EX_SOFTWARE 'Expected DIRECTORY HISTORY DEPTH'
+      make_snapshot_repo "$1" "$2" "$3"
+    ;;
     __test-review)
-      [ "$#" -eq 3 ] || die 'Expected BUNDLE HOST_BASE GUEST_BASE'
+      [ "$#" -eq 3 ] || panic $EX_SOFTWARE 'Expected BUNDLE HOST_BASE GUEST_BASE'
       temp=$(mktemp -d "$TMP/review.XXXXXX")
       trap 'rm -rf "$temp"' EXIT HUP INT TERM
-      create_review_branch "$1" "$2" "$3";;
-    *) die "Unknown command '$cmd'";;
+      create_review_branch "$1" "$2" "$3"
+    ;;
+    __unsafe-qemu) [ "$#" -eq 0 ] || panic $EX_USAGE 'unsafe takes no arguments'; cmd_vm_unsafe_qemu ;;
+    __repair|provision) [ "$#" -eq 0 ] || panic $EX_USAGE "$cmd takes no arguments"; cmd_vm_provision ;;
+    __debug) [ "$#" -eq 0 ] || panic $EX_USAGE 'debug takes no arguments'; cmd_vm_debug ;;
+    __console-password) [ "$#" -eq 0 ] || panic $EX_USAGE 'console-password takes no arguments'; cmd_console_password ;;
+    *) panic $EX_USAGE "Unknown command '$cmd'" ;;
   esac
 }
+
 main "$@"
+
+)
+
+cli "$@"

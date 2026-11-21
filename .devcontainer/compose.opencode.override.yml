@@ -1,0 +1,314 @@
+configs:
+  opencode.managed.jsonc:
+    content: |
+      {
+        "$$schema": "https://opencode.ai/config.json",
+        "update": "disable",
+        "policies": [
+          {
+            "action": "provider.use",
+            "resource": "*",
+            "effect": "deny"
+          },
+          {
+            "action": "provider.use",
+            "resource": "ollama-local",
+            "effect": "allow"
+          },
+          {
+            "effect": "deny",
+            "action": "provider.use",
+            "resource": "*"
+          },
+          {
+            "effect": "allow",
+            "action": "provider.use",
+            "resource": "ollama-local"
+          }
+        ],
+        "permissions": [
+          {
+            "action": "shell",
+            "resource": "sudo *",
+            "effect": "deny"
+          },
+          {
+            "action": "shell",
+            "resource": "rm -rf /*",
+            "effect": "deny"
+          },
+          {
+            "action": "read",
+            "resource": "~/.ssh/*",
+            "effect": "deny"
+          },
+          {
+            "action": "read",
+            "resource": "~/.aws/*",
+            "effect": "deny"
+          },
+          {
+            "action": "read",
+            "resource": "~/.gnupg/*",
+            "effect": "deny"
+          },
+          {
+            "action": "external_directory",
+            "resource": "*",
+            "effect": "deny"
+          },
+          {
+            "action": "external_directory",
+            "resource": "~/.ssh/*",
+            "effect": "deny"
+          },
+          {
+            "action": "external_directory",
+            "resource": "~/.aws/*",
+            "effect": "deny"
+          },
+          {
+            "action": "external_directory",
+            "resource": "~/.gnupg/*",
+            "effect": "deny"
+          },
+          {
+            "action": "external_directory",
+            "resource": "~/.local/*",
+            "effect": "deny"
+          }
+        ],
+        "providers": {
+          "ollama-local": {
+            "name": "Ollama (local)",
+            "package": "aisdk:@ai-sdk/openai-compatible",
+            "settings": {
+              "baseURL": "http://ollama-proxy:11434/v1"
+            },
+            "models": {
+              "flint:40b": {},
+              "granite4.2:30b": {},
+              "gemma4:e4b": {},
+              "gemma4:31b-mlx": {},
+              "gpt-oss:20b": {},
+              "gpt-oss:120b": {},
+              "inkling-2-mini:26b-a5b-nvfp4": {},
+              "laguna-xs-2.1:mlx-bf16": {},
+              "laguna-s-2.1:q4_K_M": {},
+              "lfm2.5:24b": {},
+              "muse-glimmer:30b-mlx": {},
+              "nemotron-3-nano:30b": {},
+              "nemotron-3.5-lightning:30b": {},
+              "nemotron-3.5-super:120b": {},
+              "ornith-1.5:35b": {},
+              "ornith-1.5:122b": {},
+              "qwen3.8:27b-mlx": {},
+              "qwen3.8-flash-next:125b-mlx": {},
+              "r1-1776:70b": {},
+              "ripple-preview:65b": {},
+            },
+          },
+        },
+      }
+  opencode.user.jsonc:
+    content: |
+      {
+        "$$schema": "https://opencode.ai/config.json",
+        "model": "ollama-local/qwen3.8-flash-next:125b-mlx",
+        "lsp": true,
+        "share": "manual",
+        "shell": "bash",
+        "username": "guest",
+        "experimental": {
+          "todo": true,
+          "subagent_depth": 1
+        },
+        "default_agent": "scout",
+        "agents": {
+          "build": {
+            "model": "ollama-local/qwen3.8-flash-next:125b-mlx"
+          },
+          "explore": {
+            "model": "ollama-local/qwen3.8-flash-next:125b-mlx"
+          },
+          "plan": {
+            "model": "ollama-local/qwen3.8-flash-next:125b-mlx"
+          },
+          "prototype": {
+            "model": "ollama-local/ripple-preview:65b"
+          },
+          "scout": {
+            "model": "ollama-local/nemotron-3.5-lightning:30b"
+          },
+          "title": {
+            "model": "ollama-local/gemma4:e4b"
+          }
+        },
+        "snapshots": true,
+        "formatter": {
+          "oxfmt": {
+            "extensions": [".js", ".ts", ".jsx", ".tsx", ".json"],
+          },
+        },
+        "permissions": [
+          {
+            "action": "*",
+            "resource": "*",
+            "effect": "ask"
+          },
+          {
+            "action": "edit",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "*",
+            "effect": "ask"
+          },
+          {
+            "action": "shell",
+            "resource": "cat *",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "ls *",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "grep",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "git diff*",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "git log*",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "git show*",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "git status*",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "head",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "rg *",
+            "effect": "allow"
+          },
+          {
+            "action": "shell",
+            "resource": "wc",
+            "effect": "allow"
+          },
+          {
+            "action": "edit",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "external_directory",
+            "resource": "/scratch/*",
+            "effect": "allow"
+          },
+          {
+            "action": "glob",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "grep",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "read",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "read",
+            "resource": "*.env",
+            "effect": "deny"
+          },
+          {
+            "action": "read",
+            "resource": "*.env.*",
+            "effect": "deny"
+          },
+          {
+            "action": "question",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "skill",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "subagent",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "webfetch",
+            "resource": "*",
+            "effect": "deny"
+          },
+          {
+            "action": "websearch",
+            "resource": "*",
+            "effect": "deny"
+          },
+          {
+            "action": "edit",
+            "resource": "*",
+            "effect": "allow"
+          },
+          {
+            "action": "todowrite",
+            "resource": "*",
+            "effect": "allow"
+          },
+        ],
+      }
+  opencode.cli.jsonc:
+    content: |
+      {
+        "$$schema": "https://opencode.ai/v2/cli.json"
+      }
+
+services:
+  sandbox:
+    configs:
+      - target: /etc/opencode/opencode.jsonc
+        source: opencode.managed.jsonc
+      - target: /home/guest/.config/opencode/opencode.jsonc
+        source: opencode.user.jsonc
+      - target: /home/guest/.config/opencode/cli.jsonc
+        source: opencode.cli.jsonc
+    volumes:
+      - target: /home/guest/.local/share/opencode
+        source: opencode-share
+        type: volume
+        read_only: false
+
+volumes:
+  opencode-share:
+    name: opencode-share

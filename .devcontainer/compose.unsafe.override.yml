@@ -1,0 +1,14 @@
+configs:
+  opencode.unsafe.jsonc:
+    content: |
+      {
+        This reminds me that the sandbox is in **unsafe** mode and prevents opencode from starting up
+      }
+
+services:
+  sandbox:
+    configs:
+      - target: /etc/opencode/opencode.jsonc
+        source: opencode.unsafe.jsonc
+    environment:
+      SANDBOX_MODE: unsafe

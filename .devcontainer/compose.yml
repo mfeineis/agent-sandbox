@@ -1,0 +1,234 @@
+name: ai
+
+configs:
+  instructions.sandbox.md:
+    content: |
+      FIXME: Sandbox Prompt
+  bashrc:
+    content: |
+      # ~/.bashrc: executed by bash(1) for non-login shells.
+      # see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+      # for examples
+
+      # If not running interactively, don't do anything
+      case $- in
+        *i*) ;;
+          *) return;;
+      esac
+
+      # don't put duplicate lines or lines starting with space in the history.
+      # See bash(1) for more options
+      HISTCONTROL=ignoreboth
+
+      # append to the history file, don't overwrite it
+      shopt -s histappend
+
+      # for setting history length see HISTSIZE and HISTFILESIZE in bash(1)
+      HISTSIZE=1000
+      HISTFILESIZE=2000
+
+      # check the window size after each command and, if necessary,
+      # update the values of LINES and COLUMNS.
+      shopt -s checkwinsize
+
+      # If set, the pattern "**" used in a pathname expansion context will
+      # match all files and zero or more directories and subdirectories.
+      #shopt -s globstar
+
+      # make less more friendly for non-text input files, see lesspipe(1)
+      [ -x /usr/bin/lesspipe ] && eval "$$(SHELL=/bin/sh lesspipe)"
+
+      # set variable identifying the chroot you work in (used in the prompt below)
+      if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+        debian_chroot=$(cat /etc/debian_chroot)
+      fi
+
+      # set a fancy prompt (non-color, unless we know we "want" color)
+      case "$$TERM" in
+        xterm-color|*-256color) color_prompt=yes;;
+      esac
+
+      # uncomment for a colored prompt, if the terminal has the capability; turned
+      # off by default to not distract the user: the focus in a terminal window
+      # should be on the output of commands, not on the prompt
+      force_color_prompt=yes
+
+      if [ -n "$$force_color_prompt" ]; then
+        if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+          # We have color support; assume it's compliant with Ecma-48
+          # (ISO/IEC-6429). (Lack of such support is extremely rare, and such
+          # a case would tend to support setf rather than setaf.)
+          color_prompt=yes
+        else
+          color_prompt=
+        fi
+      fi
+
+      # shellcheck disable=SC1091
+      [ -f /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion
+
+      case "$$SANDBOX_MODE" in
+        restricted)   PS1='\[\e[1;32m\]🏖️ $${debian_chroot:+($$debian_chroot)}\u\[\e[0m\] \w \$$ ' ;;
+        unsafe) PS1='\[\e[1;41;97m\] UNSAFE \[\e[0m\] $${debian_chroot:+($$debian_chroot)}\u \w \$$ ' ;;
+        *) echo "SANDBOX_MODE='$${SANDBOX_MODE}' is not a known mode, refusing to start" >&2
+          exit 1 ;;
+      esac
+
+      alias ll="ls -la"
+      export PROMPT_DIRTRIM=1
+
+      workspace_clone() {
+        if [ -z "$$1" ]; then
+          echo "Expected 1 working directory name" >&2
+          return 1
+        fi
+        git clone -b work http://host.containers.internal:3001/firebreak/workspace.git "$$1"
+        cd "$$1"
+      }
+  gitconfig:
+    content: |
+      [core]
+        editor = vim -f
+      [user]
+        name = ${FIREBREAK_GIT_USER:?required}
+        email = ${FIREBREAK_GIT_EMAIL:?require}
+      [init]
+        defaultBranch = main
+      [color]
+        ui = auto
+  nginx.ollama-proxy.conf:
+    content: |
+      server {
+        listen 0.0.0.0:11434;
+        server_name localhost;
+
+        # Increase if sending large images or documents
+        client_max_body_size 50m;
+
+        # Inference endpoints (POST only)
+        location ~ ^/(api/(chat|generate|embed|embeddings|show)|v1/(chat/completions|completions|embeddings|responses))$$ {
+          if ($$request_method != POST) {
+            return 405;
+          }
+
+          proxy_pass http://10.0.2.100:11434;
+          proxy_http_version 1.1;
+
+          # Allow streaming responses
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+
+        # Read-only endpoints (GET only)
+        location ~ ^/(api/(tags|ps|version)|v1/models)$$ {
+          if ($$request_method != GET) {
+              return 405;
+          }
+
+          proxy_pass http://10.0.2.100:11434;
+          proxy_http_version 1.1;
+        }
+
+        location = /api/pull {
+          deny all;
+        }
+
+        location = /api/push {
+          deny all;
+        }
+
+        # Deny all other endpoints
+        location / {
+          return 403;
+        }
+      }
+  npmrc:
+    content: |
+      proxy = http://10.0.2.100:3128
+      https-proxy = http://10.0.2.100:3128
+      min-release-age = ${CUSTOM_NPM_MIN_RELEASE_AGE:-2}
+      audit = true
+      save-exact = true
+      prefer-offline = true
+
+services:
+  ollama-proxy:
+    container_name: ollama-proxy
+    restart: always
+    configs:
+      - target: /etc/nginx/templates/default.conf.template
+        source: nginx.ollama-proxy.conf
+    image: docker.io/library/nginx:alpine
+    networks:
+      net-uplink:
+      net-internal:
+  sandbox:
+    container_name: sandbox
+    user: "1000"
+    restart: unless-stopped
+    build:
+      context: ..
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # pids-limit: 256
+    # memory: 4g
+    configs:
+      - target: /home/guest/.npmrc
+        source: npmrc
+        uid: "1000"
+        gid: "1000"
+        mode: 0440
+      - target: /home/guest/.bashrc
+        source: bashrc
+        uid: "1000"
+        gid: "1000"
+      - target: /home/guest/.gitconfig
+        source: gitconfig
+        uid: "1000"
+        gid: "1000"
+        mode: 0440
+    environment:
+      SANDBOX_MODE: restricted
+      TZ: Europe/Berlin
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: credential.helper
+      GIT_CONFIG_VALUE_0: "!/run/firebreak/git-credential-helper"
+      https_proxy: ${https_proxy:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      no_proxy: localhost,127.0.0.1,host.containers.internal,host.docker.internal
+      NO_PROXY: localhost,127.0.0.1,host.contaienrs.internal,host.docker.internal
+      HOME: /home/guest
+      TMPDIR: /scratch
+    read_only: false
+    networks:
+      net-internal:
+    volumes:
+      - type: bind
+        source: ${FIREBREAK_GIT_CREDENTIALS_FILE:?required}
+        target: /run/firebreak/git-credentials
+        read_only: true
+      - type: bind
+        source: ${FIREBREAK_GIT_HELPER_FILE:?required}
+        target: /run/firebreak/git-credential-helper
+        read_only: true
+      - target: /home/guest/.local/share/opencode
+        source: opencode-share
+        type: volume
+        read_only: false
+      - target: /scratch
+        type: tmpfs
+        tmpfs:
+          size: 64m
+          mode: 0o1777 # writable to non-root with sticky-bit
+
+networks:
+  net-uplink:
+    name: net-uplink
+  net-internal:
+    name: net-internal
+    internal: true

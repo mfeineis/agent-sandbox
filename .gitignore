@@ -3,9 +3,6 @@
 /local/*
 !/local/README.md
 
-# Top-level Development containers
-/.devcontainer/
-
 # Build artifacts
 /.build/
 /output/
@@ -35,5 +32,8 @@ yarn-error.log*
 
 # Test artifacts
 test-results/
-.devcontainer/firebreak/
 .env
+.devcontainer/*
+!.devcontainer/compose.*
+!.devcontainer/Dockerfile*
+!.devcontainer/firebreak.conf
