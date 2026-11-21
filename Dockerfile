@@ -3,10 +3,12 @@
 ARG TZ=Etc/UTC
 # Debian LTS 13 "trixie"
 ARG DEBIAN_VERSION=trixie
+# ARG DEBIAN_IMAGE_VARIANT="-slim"
+ARG DEBIAN_IMAGE_VARIANT=""
 ARG NODE_VERSION=26.13.1
 ARG NODE_OPTIONS="--max-old-space-size=8192"
 
-FROM node:${NODE_VERSION}-${DEBIAN_VERSION}-slim AS os-base
+FROM node:${NODE_VERSION}-${DEBIAN_VERSION}${DEBIAN_IMAGE_VARIANT} AS os-base
 
 FROM os-base
 LABEL dev.containers.features="common"
