@@ -6,17 +6,15 @@ install_opencode() {
 
   NPM_CONFIG_IGNORE_SCRIPTS=false \
     npm install -g \
-    "opencode-ai@${CLIVERSION}" \
-    --allow-scripts="opencode-ai@${CLIVERSION}"
+    "@opencode/cli@${CLIVERSION}" \
+    --allow-scripts="@opencode/cli@${CLIVERSION}"
 
-  if command -v opencode >/dev/null; then
-    echo "Opencode CLI installed successfully!"
-    claude --version
-    return 0
-  else
+  if ! command -v opencode >/dev/null; then
     echo "ERROR: Opencode CLI installation failed!"
-    return 1
+    exit 2
   fi
+  echo "Opencode CLI installed successfully!"
+  opencode debug config || exit 1
 }
 
 # Print error message about requiring Node.js feature
@@ -48,15 +46,16 @@ main() {
   fi
 
   # Install Opencode CLI
-  install_opencode || exit 1
+  install_opencode || exit
 
+  mkdir -p "/home/$_REMOTE_USER/.config/opencode"
   mkdir -p "/home/$_REMOTE_USER/.local/share/opencode"
   mkdir -p "/home/$_REMOTE_USER/.local/state/"
+  chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"/.config/opencode
   chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"/.local/share/opencode
   chown -R "$_REMOTE_USER" "/home/$_REMOTE_USER"/.local/state
 
   # claude --append-system-prompt "$(cat ./container-prompt.md)"
-  exit 0
 }
 
 # Execute main function

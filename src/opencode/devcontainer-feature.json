@@ -1,14 +1,14 @@
 {
   "id": "opencode",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "dependsOn": {
-    "ghcr.io/mfeineis/agent-sandbox/base:0.3.0": {}
+    "ghcr.io/mfeineis/agent-sandbox/base:0.4.0": {}
   },
   "name": "Opencode Agent Sandbox Feature",
   "description": "Installs the Opencode CLI into an Agent Sandbox",
   "options": {
     "cliVersion": {
-      "default": "1.19.4",
+      "default": "2.3.2",
       "type": "string"
     }
   },
