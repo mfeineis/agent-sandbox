@@ -216,10 +216,6 @@ services:
         source: ${FIREBREAK_GIT_HELPER_FILE:?required}
         target: /run/firebreak/git-credential-helper
         read_only: true
-      - target: /home/guest/.local/share/opencode
-        source: opencode-share
-        type: volume
-        read_only: false
       - target: /scratch
         type: tmpfs
         tmpfs:
