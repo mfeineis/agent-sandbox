@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  DEVCONTAINER_CLI: 0.87.0
+  DEVCONTAINER_CLI: 0.91.0
 
 jobs:
   validate:

@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  DEVCONTAINER_CLI: 0.87.0
+  DEVCONTAINER_CLI: 0.91.0
 
 jobs:
   deploy-baseimage:
